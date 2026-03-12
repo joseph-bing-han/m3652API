@@ -1,0 +1,7 @@
+config.yaml
+auth/
+./m3652api
+.DS_Store
+**/.DS_Store
+.tmp/
+go.sum

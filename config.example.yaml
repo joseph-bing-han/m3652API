@@ -1,0 +1,58 @@
+# Minimal config for m3652api (embedded CLIProxyAPI server).
+#
+# Copy to config.yaml and adjust values.
+
+# Bind to localhost only for safety.
+host: "localhost"
+port: 8217
+
+# Where m3652api auth state and token cache are stored.
+auth-dir: "./auth"
+
+# API keys required by the embedded OpenAI-compatible server.
+# Codex CLI should use one of these as OPENAI_API_KEY.
+api-keys:
+  - "change-me"
+
+# Optional outbound proxy for upstream requests (http/https/socks5).
+# proxy-url: "socks5://user:pass@localhost:1080"
+proxy-url: ""
+
+# M365 static credentials (required).
+m365:
+  # Optional auth ID used in auth-dir; defaults to "m365-static".
+  auth-id: "m365-static"
+  tenant-id: "your-tenant-id"
+  client-id: "your-client-id"
+  client-secret: "your-client-secret"
+  timezone: "Pacific/Auckland"
+  # App-only scopes (client credentials flow). Copilot Chat API is delegated-only;
+  # this field is kept for completeness but m3652api chat execution requires delegated login.
+  scopes:
+    - "https://graph.microsoft.com/.default"
+  # Delegated scopes (authorization code flow) used to obtain refresh_token.
+  # You must configure redirect-uri in Entra ID app settings.
+  # If omitted, defaults to a reasonable set including offline_access.
+  # redirect-uri: "http://localhost:8217/m365/oauth/callback"
+  # authorize-prompt: "select_account"
+  # delegated-scopes:
+  #   - "openid"
+  #   - "profile"
+  #   - "offline_access"
+  #   - "https://graph.microsoft.com/User.Read"
+  #   - "https://graph.microsoft.com/Sites.Read.All"
+  #   - "https://graph.microsoft.com/Mail.Read"
+  #   - "https://graph.microsoft.com/People.Read.All"
+  #   - "https://graph.microsoft.com/OnlineMeetingTranscript.Read.All"
+  #   - "https://graph.microsoft.com/Chat.Read"
+  #   - "https://graph.microsoft.com/ChannelMessage.Read.All"
+  #   - "https://graph.microsoft.com/ExternalItem.Read.All"
+  # Optional OCR language pack list for tesseract.
+  # Example: "eng+chi_sim"
+  ocr-langs: "eng"
+
+# Keep WebSocket auth disabled; this project focuses on HTTP SSE.
+ws-auth: false
+
+# Debug logging
+debug: false
