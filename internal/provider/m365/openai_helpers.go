@@ -1,0 +1,145 @@
+package m365
+
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/tidwall/gjson"
+)
+
+type openAITool struct {
+	ToolType      string
+	Name          string
+	Description   string
+	RawJSONSchema string
+}
+
+func parseOpenAITools(rawRequest []byte) []openAITool {
+	tools := gjson.GetBytes(rawRequest, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	out := make([]openAITool, 0, len(tools.Array()))
+	for _, t := range tools.Array() {
+		tt := strings.TrimSpace(t.Get("type").String())
+		if tt == "" {
+			continue
+		}
+
+		name := strings.TrimSpace(t.Get("name").String())
+		if name == "" && tt == "local_shell" {
+			name = "local_shell"
+		}
+
+		desc := strings.TrimSpace(t.Get("description").String())
+		schema := ""
+		if tt == "function" {
+			if params := t.Get("parameters"); params.Exists() {
+				schema = params.Raw
+			}
+		}
+
+		out = append(out, openAITool{
+			ToolType:      tt,
+			Name:          name,
+			Description:   desc,
+			RawJSONSchema: schema,
+		})
+	}
+	return out
+}
+
+type turnExtract struct {
+	UserTaskText string
+	ImageURLs    []string
+	ToolOutputs  []string
+}
+
+func extractTurnData(newItems []gjson.Result) turnExtract {
+	var userTextParts []string
+	var imageURLs []string
+	var toolOutputs []string
+
+	// 提取最后一条用户消息。
+	for i := len(newItems) - 1; i >= 0; i-- {
+		it := newItems[i]
+		if strings.TrimSpace(it.Get("type").String()) != "message" {
+			continue
+		}
+		if strings.TrimSpace(it.Get("role").String()) != "user" {
+			continue
+		}
+		content := it.Get("content")
+		if !content.IsArray() {
+			break
+		}
+		for _, part := range content.Array() {
+			pt := strings.TrimSpace(part.Get("type").String())
+			switch pt {
+			case "input_text":
+				if txt := part.Get("text").String(); strings.TrimSpace(txt) != "" {
+					userTextParts = append(userTextParts, txt)
+				}
+			case "input_image":
+				img := part.Get("image_url")
+				u := ""
+				if img.Type == gjson.String {
+					u = strings.TrimSpace(img.String())
+				} else if img.Exists() {
+					u = strings.TrimSpace(img.Get("url").String())
+				}
+				if u != "" {
+					imageURLs = append(imageURLs, u)
+				}
+			}
+		}
+		break
+	}
+
+	// 按顺序收集工具输出。
+	for _, it := range newItems {
+		switch strings.TrimSpace(it.Get("type").String()) {
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			callID := strings.TrimSpace(it.Get("call_id").String())
+			out := it.Get("output")
+			outText := ""
+			switch out.Type {
+			case gjson.String:
+				outText = out.String()
+			default:
+				if out.Exists() {
+					outText = out.Raw
+				}
+			}
+			outText = strings.TrimSpace(outText)
+			if outText == "" {
+				continue
+			}
+			toolOutputs = append(toolOutputs, buildToolOutputLine(callID, outText))
+		}
+	}
+
+	userTaskText := strings.TrimSpace(strings.Join(userTextParts, "\n"))
+	return turnExtract{
+		UserTaskText: userTaskText,
+		ImageURLs:    imageURLs,
+		ToolOutputs:  toolOutputs,
+	}
+}
+
+func buildToolOutputLine(callID, outText string) string {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return outText
+	}
+	return "call_id=" + callID + "\n" + outText
+}
+
+func jsonString(v any) (string, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
