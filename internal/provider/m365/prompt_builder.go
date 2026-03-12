@@ -1,13 +1,16 @@
 package m365
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 const (
 	maxContextBlockChars = 12000
-	maxToolsInDirectory  = 60
+	maxSchemaSummaryChar = 240
 )
 
 func buildAdditionalContext(instructions, reasoningEffort, verbosity string, tools []openAITool, toolOutputs []string, ocrResults []string) []m365ContextMessage {
@@ -34,7 +37,7 @@ func buildAdditionalContext(instructions, reasoningEffort, verbosity string, too
 
 	out = append(out, m365ContextMessage{
 		Description: "Tool calling protocol",
-		Text:        truncateMiddle(toolCallingProtocolV1(), maxContextBlockChars),
+		Text:        truncateMiddle(toolCallingProtocolV2(), maxContextBlockChars),
 	})
 
 	if dir := strings.TrimSpace(buildToolDirectory(tools)); dir != "" {
@@ -100,25 +103,44 @@ func buildStyleHints(reasoningEffort, verbosity string) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func toolCallingProtocolV1() string {
-	return strings.TrimSpace(`
-If you need to use a tool, output ONLY a single JSON object.
+func toolCallingProtocolV2() string {
+	return strings.TrimSpace(fmt.Sprintf(`
+If you need to use tools, output one or more tool blocks using this exact delimiter protocol.
 
 Rules:
-- No extra text.
-- No markdown code fences.
-- Do not output multiple JSON objects.
-- Only use tools from the available tools list.
+- Tool blocks can appear only at the end of your response.
+- No markdown code fences for tool blocks.
+- Use only tools from the available tools list.
+- For function/local_shell tools, arguments must be valid JSON object.
+- For custom/freeform tools, output raw input exactly between input delimiters.
+- If user asks to create/modify/delete files, or run shell/command operations, you MUST call tool(s).
+- Never claim file/command side effects are completed unless tool output confirms success.
 
-Schema:
-- Function tool:
-  {"type":"tool_call","tool":"<tool_name>","arguments":{...}}
-- Custom/freeform tool:
-  {"type":"tool_call","tool":"<tool_name>","input":"..."}
+Function/local_shell block:
+%s
+%s<tool_name>%s
+%s{...}%s
+%s
 
-Special case: local_shell
-  {"type":"tool_call","tool":"local_shell","arguments":{"command":["ls","-la"],"working_directory":".","timeout_ms":60000}}
-`)
+Custom/freeform block:
+%s
+%s<tool_name>%s
+%s<raw_input>%s
+%s
+
+Fallback (only if delimiter protocol fails):
+{"type":"tool_call","tool":"<tool_name>","arguments":{...}}
+{"type":"tool_call","tool":"<tool_name>","input":"..."}
+`,
+		toolCallV2Start,
+		toolCallV2NameStart, toolCallV2NameEnd,
+		toolCallV2ArgsStart, toolCallV2ArgsEnd,
+		toolCallV2End,
+		toolCallV2Start,
+		toolCallV2NameStart, toolCallV2NameEnd,
+		toolCallV2InputStart, toolCallV2InputEnd,
+		toolCallV2End,
+	))
 }
 
 func buildToolDirectory(tools []openAITool) string {
@@ -127,24 +149,78 @@ func buildToolDirectory(tools []openAITool) string {
 	}
 	var b strings.Builder
 	b.WriteString("Available tools:\n")
-	count := 0
 	for _, t := range tools {
-		if t.Name == "" {
+		name := strings.TrimSpace(t.Name)
+		if name == "" {
 			continue
 		}
-		count++
-		if count > maxToolsInDirectory {
-			b.WriteString("- ...(truncated)\n")
-			break
-		}
-		line := fmt.Sprintf("- %s: %s", t.ToolType, t.Name)
+		line := fmt.Sprintf("- type=%s name=%s", strings.TrimSpace(t.ToolType), name)
 		if t.Description != "" {
-			line += " - " + t.Description
+			line += " description=" + truncateMiddle(strings.TrimSpace(t.Description), 160)
+		}
+		if schema := summarizeToolSchema(t.RawJSONSchema); schema != "" {
+			line += " schema=" + schema
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func summarizeToolSchema(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	// 优先提取对象schema最关键的信息，减少上下文体积。
+	parsed := gjson.Parse(raw)
+	if parsed.Exists() {
+		t := strings.TrimSpace(parsed.Get("type").String())
+		requiredVals := parsed.Get("required").Array()
+		required := make([]string, 0, len(requiredVals))
+		for _, it := range requiredVals {
+			if s := strings.TrimSpace(it.String()); s != "" {
+				required = append(required, s)
+			}
+		}
+		props := 0
+		if p := parsed.Get("properties"); p.Exists() {
+			props = len(p.Map())
+		}
+
+		var parts []string
+		if t != "" {
+			parts = append(parts, "type="+t)
+		}
+		if props > 0 {
+			parts = append(parts, fmt.Sprintf("properties=%d", props))
+		}
+		if len(required) > 0 {
+			parts = append(parts, "required="+strings.Join(required, ","))
+		}
+		if len(parts) > 0 {
+			return truncateMiddle(strings.Join(parts, ";"), maxSchemaSummaryChar)
+		}
+	}
+
+	// 兜底：保留紧凑JSON片段。
+	if compact, err := compactJSON(raw); err == nil {
+		return truncateMiddle(compact, maxSchemaSummaryChar)
+	}
+	return truncateMiddle(raw, maxSchemaSummaryChar)
+}
+
+func compactJSON(raw string) (string, error) {
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func truncateMiddle(s string, maxChars int) string {

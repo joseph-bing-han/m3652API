@@ -22,22 +22,43 @@ func parseOpenAITools(rawRequest []byte) []openAITool {
 
 	out := make([]openAITool, 0, len(tools.Array()))
 	for _, t := range tools.Array() {
-		tt := strings.TrimSpace(t.Get("type").String())
+		tt := strings.ToLower(strings.TrimSpace(t.Get("type").String()))
 		if tt == "" {
 			continue
 		}
 
 		name := strings.TrimSpace(t.Get("name").String())
-		if name == "" && tt == "local_shell" {
-			name = "local_shell"
-		}
-
 		desc := strings.TrimSpace(t.Get("description").String())
 		schema := ""
+
 		if tt == "function" {
-			if params := t.Get("parameters"); params.Exists() {
-				schema = params.Raw
+			fn := t.Get("function")
+			if fn.Exists() {
+				if name == "" {
+					name = strings.TrimSpace(fn.Get("name").String())
+				}
+				if desc == "" {
+					desc = strings.TrimSpace(fn.Get("description").String())
+				}
+				if params := fn.Get("parameters"); params.Exists() {
+					schema = params.Raw
+				}
 			}
+			if schema == "" {
+				if params := t.Get("parameters"); params.Exists() {
+					schema = params.Raw
+				}
+			}
+		}
+
+		if name == "" {
+			switch tt {
+			case "local_shell", "tool_search", "web_search", "image_generation":
+				name = tt
+			}
+		}
+		if name == "" {
+			continue
 		}
 
 		out = append(out, openAITool{

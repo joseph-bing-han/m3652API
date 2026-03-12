@@ -152,10 +152,9 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	defer resp.Body.Close()
 
 	var finalAssistantText string
-	toolMode := false
 	sawToolCandidate := false
 	toolEmitted := false
-	var toolItem any
+	var toolItems []any
 
 	_ = readSSEStream(upCtx, resp.Body, func(ev sseEvent) bool {
 		_, current := selectAssistantMessage(ev.Data, userTask)
@@ -164,27 +163,22 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 		}
 		finalAssistantText = current
 
-		if len(tools) > 0 && !toolMode && looksLikeToolCallCandidate(current) {
-			toolMode = true
+		if len(tools) > 0 && looksLikeToolCallCandidate(current) {
 			sawToolCandidate = true
 		}
-		if toolMode {
-			if tc, ok := tryParseToolCall(current); ok {
-				callID := "call_" + uuid.NewString()
-				if item, ok := buildToolCallItem(callID, tc, tools); ok {
-					toolItem = item
-					toolEmitted = true
-					upCancel()
-					return false
-				}
+		if len(tools) > 0 {
+			if items := parseToolCallItems(current, tools); len(items) > 0 {
+				toolItems = items
+				toolEmitted = true
+				upCancel()
+				return false
 			}
-			return true
 		}
 		return true
 	})
 
-	if toolEmitted && toolItem != nil {
-		out, err := buildNonStreamingResponse(responseID, model, []any{toolItem})
+	if toolEmitted && len(toolItems) > 0 {
+		out, err := buildNonStreamingResponse(responseID, model, toolItems)
 		if err != nil {
 			return clipexec.Response{}, err
 		}
@@ -193,24 +187,8 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 
 	// 兜底解析：上游可能会把 JSON 包在额外文本中。
 	if len(tools) > 0 {
-		if tc, ok := tryParseToolCall(finalAssistantText); ok {
-			callID := "call_" + uuid.NewString()
-			if item, ok := buildToolCallItem(callID, tc, tools); ok {
-				out, err := buildNonStreamingResponse(responseID, model, []any{item})
-				if err != nil {
-					return clipexec.Response{}, err
-				}
-				return clipexec.Response{Payload: out}, nil
-			}
-		}
-	}
-
-	if !sawToolCandidate && looksLikeToolCallCandidate(finalAssistantText) {
-		sawToolCandidate = true
-	}
-	if sawToolCandidate && len(tools) > 0 && ctx.Err() == nil {
-		if item, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
-			out, err := buildNonStreamingResponse(responseID, model, []any{item})
+		if items := parseToolCallItems(finalAssistantText, tools); len(items) > 0 {
+			out, err := buildNonStreamingResponse(responseID, model, items)
 			if err != nil {
 				return clipexec.Response{}, err
 			}
@@ -218,7 +196,21 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 		}
 	}
 
-	item := buildAssistantMessageItem(finalAssistantText)
+	if !sawToolCandidate && looksLikeToolCallCandidate(finalAssistantText) {
+		sawToolCandidate = true
+	}
+	forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, tools)
+	if forceRepair && len(tools) > 0 && ctx.Err() == nil {
+		if items, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
+			out, err := buildNonStreamingResponse(responseID, model, items)
+			if err != nil {
+				return clipexec.Response{}, err
+			}
+			return clipexec.Response{Payload: out}, nil
+		}
+	}
+
+	item := buildAssistantMessageItem(sanitizeAssistantTextForDisplay(finalAssistantText))
 	out, err := buildNonStreamingResponse(responseID, model, []any{item})
 	if err != nil {
 		return clipexec.Response{}, err
@@ -362,7 +354,6 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		lastTextByMsgID := make(map[string]string, 4)
 		var finalAssistantText string
 		toolEmitted := false
-		toolMode := false
 		sawToolCandidate := false
 
 		_ = readSSEStream(upCtx, resp.Body, func(ev sseEvent) bool {
@@ -372,26 +363,25 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 			}
 			finalAssistantText = current
 
-			if len(tools) > 0 && !toolMode && looksLikeToolCallCandidate(current) {
-				toolMode = true
-				sawToolCandidate = true
-			}
-			if toolMode {
-				if tc, ok := tryParseToolCall(current); ok {
-					callID := "call_" + uuid.NewString()
-					if item, ok := buildToolCallItem(callID, tc, tools); ok {
+			visibleCurrent := current
+			if len(tools) > 0 {
+				if looksLikeToolCallCandidate(current) {
+					sawToolCandidate = true
+				}
+				if items := parseToolCallItems(current, tools); len(items) > 0 {
+					for _, item := range items {
 						if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 							ch <- clipexec.StreamChunk{Payload: outEv}
 						}
-						if done, err := buildResponseCompletedEvent(responseID); err == nil {
-							ch <- clipexec.StreamChunk{Payload: done}
-						}
-						toolEmitted = true
-						upCancel()
-						return false
 					}
+					if done, err := buildResponseCompletedEvent(responseID); err == nil {
+						ch <- clipexec.StreamChunk{Payload: done}
+					}
+					toolEmitted = true
+					upCancel()
+					return false
 				}
-				return true
+				visibleCurrent = sanitizeAssistantTextForDisplay(current)
 			}
 
 			msgID = strings.TrimSpace(msgID)
@@ -399,13 +389,13 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 				msgID = "unknown"
 			}
 			last := lastTextByMsgID[msgID]
-			delta := current
-			if strings.HasPrefix(current, last) {
-				delta = current[len(last):]
+			delta := visibleCurrent
+			if strings.HasPrefix(visibleCurrent, last) {
+				delta = visibleCurrent[len(last):]
 			} else if last != "" {
-				delta = "\n" + current
+				delta = "\n" + visibleCurrent
 			}
-			lastTextByMsgID[msgID] = current
+			lastTextByMsgID[msgID] = visibleCurrent
 			delta = strings.TrimSpace(delta)
 			if delta == "" {
 				return true
@@ -420,29 +410,31 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 			return
 		}
 
-		// 兜底解析：上游可能会把 JSON 包在额外文本中。
+		// 兜底解析：上游可能会把 JSON 或定界符块包在额外文本中。
 		if len(tools) > 0 {
-			if tc, ok := tryParseToolCall(finalAssistantText); ok {
-				callID := "call_" + uuid.NewString()
-				if item, ok := buildToolCallItem(callID, tc, tools); ok {
+			if items := parseToolCallItems(finalAssistantText, tools); len(items) > 0 {
+				for _, item := range items {
 					if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 						ch <- clipexec.StreamChunk{Payload: outEv}
 					}
-					if done, err := buildResponseCompletedEvent(responseID); err == nil {
-						ch <- clipexec.StreamChunk{Payload: done}
-					}
-					return
 				}
+				if done, err := buildResponseCompletedEvent(responseID); err == nil {
+					ch <- clipexec.StreamChunk{Payload: done}
+				}
+				return
 			}
 		}
 
 		if !sawToolCandidate && looksLikeToolCallCandidate(finalAssistantText) {
 			sawToolCandidate = true
 		}
-		if sawToolCandidate && len(tools) > 0 && ctx.Err() == nil {
-			if item, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
-				if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
-					ch <- clipexec.StreamChunk{Payload: outEv}
+		forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, tools)
+		if forceRepair && len(tools) > 0 && ctx.Err() == nil {
+			if items, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
+				for _, item := range items {
+					if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
+						ch <- clipexec.StreamChunk{Payload: outEv}
+					}
 				}
 				if done, err := buildResponseCompletedEvent(responseID); err == nil {
 					ch <- clipexec.StreamChunk{Payload: done}
@@ -455,7 +447,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 			finalAssistantText = ""
 		}
 
-		item := buildAssistantMessageItem(finalAssistantText)
+		item := buildAssistantMessageItem(sanitizeAssistantTextForDisplay(finalAssistantText))
 		if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 			ch <- clipexec.StreamChunk{Payload: outEv}
 		}
@@ -518,8 +510,11 @@ func selectAssistantMessage(conversationJSON []byte, userTask string) (string, s
 	var candidateID string
 	var candidateText string
 
-	// 优先选择最后一条非空消息，并尽量避免回显 userTask。
+	// 优先选择“明确是 assistant”且非空的消息，并尽量避免回显 userTask。
 	for _, m := range msgs.Array() {
+		if !isAssistantLikeMessage(m) {
+			continue
+		}
 		txt := strings.TrimSpace(m.Get("text").String())
 		if txt == "" {
 			continue
@@ -540,10 +535,34 @@ func selectAssistantMessage(conversationJSON []byte, userTask string) (string, s
 		if txt == "" {
 			continue
 		}
+		if userTask != "" && strings.TrimSpace(txt) == userTask {
+			continue
+		}
 		candidateText = txt
 		candidateID = strings.TrimSpace(m.Get("id").String())
 	}
 	return candidateID, candidateText
+}
+
+func isAssistantLikeMessage(m gjson.Result) bool {
+	role := strings.ToLower(strings.TrimSpace(m.Get("role").String()))
+	if role == "" {
+		role = strings.ToLower(strings.TrimSpace(m.Get("author.role").String()))
+	}
+	if role == "" {
+		role = strings.ToLower(strings.TrimSpace(m.Get("from.role").String()))
+	}
+	if role == "" {
+		return false
+	}
+	switch role {
+	case "assistant", "model", "copilot":
+		return true
+	case "user", "system", "tool":
+		return false
+	default:
+		return false
+	}
 }
 
 const (
@@ -607,7 +626,7 @@ func buildToolCallItem(callID string, tc *toolCall, tools []openAITool) (any, bo
 		}
 		return buildCustomToolCallItem(callID, toolName, input), true
 	case "function":
-		argsStr, ok := jsonString(tc.Arguments)
+		argsStr, ok := normalizeFunctionArguments(tc.Arguments)
 		if !ok {
 			return nil, false
 		}
@@ -620,8 +639,92 @@ func buildToolCallItem(callID string, tc *toolCall, tools []openAITool) (any, bo
 	}
 }
 
+func parseToolCallItems(text string, tools []openAITool) []any {
+	if len(tools) == 0 {
+		return nil
+	}
+	calls, ok := parseToolCalls(text)
+	if !ok || len(calls) == 0 {
+		return nil
+	}
+	items := make([]any, 0, len(calls))
+	for _, tc := range calls {
+		if tc == nil {
+			continue
+		}
+		callID := "call_" + uuid.NewString()
+		if item, ok := buildToolCallItem(callID, tc, tools); ok {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func sanitizeAssistantTextForDisplay(text string) string {
+	if text == "" {
+		return ""
+	}
+	if idx := strings.Index(text, toolCallV2Start); idx >= 0 {
+		return strings.TrimSpace(text[:idx])
+	}
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "```") {
+		return ""
+	}
+	return text
+}
+
+func normalizeFunctionArguments(v any) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	switch x := v.(type) {
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" || !json.Valid([]byte(s)) {
+			return "", false
+		}
+		return s, true
+	default:
+		return jsonString(v)
+	}
+}
+
+func shouldForceToolRepair(userTask, assistantText string, tools []openAITool) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	task := strings.TrimSpace(strings.ToLower(userTask))
+	if task == "" || task == "continue" || task == "continue." {
+		return false
+	}
+
+	// 当助手已经明确拒绝或说明无法执行时，不强制触发修复回合，避免死循环。
+	reply := strings.TrimSpace(strings.ToLower(assistantText))
+	if strings.Contains(reply, "can't") || strings.Contains(reply, "cannot") ||
+		strings.Contains(reply, "无法") || strings.Contains(reply, "不能") {
+		return false
+	}
+
+	// 针对“有副作用”的任务做强制修复：创建/修改文件、执行命令等。
+	keywords := []string{
+		"create file", "create a file", "write file", "write to", "append to",
+		"modify file", "edit file", "delete file", "rename file",
+		"run command", "execute command", "shell command", "apply patch",
+		"touch ", "mkdir ", "rm ", "mv ", "cp ", "chmod ", "chown ",
+		"创建文件", "新建文件", "写入", "追加", "修改文件", "编辑文件",
+		"删除文件", "重命名", "执行命令", "运行命令", "应用补丁",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(task, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseLocalShellArgs(v any) ([]string, string, int64, bool) {
-	m, ok := v.(map[string]any)
+	m, ok := asMap(v)
 	if !ok || m == nil {
 		return nil, "", 0, false
 	}
@@ -643,6 +746,11 @@ func parseLocalShellArgs(v any) ([]string, string, int64, bool) {
 		cmd = strings.Fields(c)
 	}
 	if len(cmd) == 0 {
+		if s, ok := m["cmd"].(string); ok && strings.TrimSpace(s) != "" {
+			cmd = strings.Fields(s)
+		}
+	}
+	if len(cmd) == 0 {
 		return nil, "", 0, false
 	}
 
@@ -652,4 +760,23 @@ func parseLocalShellArgs(v any) ([]string, string, int64, bool) {
 	}
 	timeout := anyInt64(m["timeout_ms"])
 	return cmd, strings.TrimSpace(wd), timeout, true
+}
+
+func asMap(v any) (map[string]any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		return x, true
+	case string:
+		raw := strings.TrimSpace(x)
+		if raw == "" || !json.Valid([]byte(raw)) {
+			return nil, false
+		}
+		var out map[string]any
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return nil, false
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }

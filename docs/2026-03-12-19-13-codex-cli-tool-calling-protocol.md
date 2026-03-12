@@ -227,3 +227,89 @@
 }
 ```
 
+
+**六、m3652api 当前工具调用解决方案（2026-03-13 更新）**
+
+> 这一节描述的是本仓库 `internal/provider/m365` 的实际落地方案，用于把只返回文本的 M365 Copilot Chat 输出，稳定转换为 Codex 可识别的 Responses 工具调用 item。
+
+### 6.1 设计目标
+
+1. 在不依赖上游原生 function calling 的前提下，稳定触发 `function_call` / `custom_tool_call` / `local_shell_call`。
+2. 支持 `apply_patch` 这类大段多行输入，避免因 JSON 转义导致调用失败。
+3. 降低“模型口头声称已完成、但未执行工具”的假成功场景。
+4. 对 Codex 的 `tools` 入参保持更高兼容（Responses 风格与 ChatCompletions 风格）。
+
+### 6.2 协议层：V2 定界符协议（主路径）+ V1 JSON（兜底）
+
+当前实现采用 **V2 定界符协议**作为主路径，允许一次回复包含多个工具调用块：
+
+- 块开始：`ꆈ龘ᐅ`
+- 块结束：`ᐊ龘ꆈ`
+- 工具名：`ꊰ▸<tool_name>◂ꊰ`
+- function/local_shell 参数：`ꊰ▹{...}◃ꊰ`（必须是 JSON object）
+- custom 原始输入：`ꊰ⟪<raw_input>⟫ꊰ`（保留多行原文）
+
+仍保留 V1 JSON 兜底：
+
+```json
+{"type":"tool_call","tool":"<tool_name>","arguments":{...}}
+{"type":"tool_call","tool":"<tool_name>","input":"..."}
+```
+
+### 6.3 解析与执行链路（m3652api）
+
+1. 候选检测：
+   - 若包含 V2 起始定界符，或文本以 `{` / markdown 代码围栏开头，则视为工具候选。
+2. 解析顺序：
+   - 先走 V2 多 block 解析（支持同一轮多个工具调用）。
+   - 失败再走 V1 JSON 解析。
+3. item 组装：
+   - 对每个解析结果生成独立 `call_id`，构建对应 `function_call` / `custom_tool_call` / `local_shell_call` item。
+4. 输出行为：
+   - 流式：依次发多个 `response.output_item.done`，最后 `response.completed`。
+   - 非流式：`output[]` 中可包含多个工具 item。
+5. 文本清洗：
+   - 给客户端展示 assistant 文本时会移除工具协议块，避免把协议原文当自然语言回显。
+
+### 6.4 关键稳健性增强
+
+1. **强制修复回合（force repair）**
+   - 当用户请求明显属于“有副作用任务”（创建/修改/删除文件、执行命令、应用补丁等），即便模型未输出工具块，也会触发修复回合，要求模型补发工具调用块。
+   - 用于修复“无报错但没有实际执行”的场景。
+
+2. **repairToolCall 升级**
+   - 修复请求提示改为 V2 定界符协议，不再只要求单 JSON。
+   - 返回值升级为多 item（`[]any`），与主执行路径一致。
+
+3. **assistant 消息过滤**
+   - 抽取消息时优先识别 assistant-like role（`assistant/model/copilot`），减少误取 user/system 文本导致的误判。
+
+4. **arguments 双重编码修复**
+   - `function_call.arguments` 若本身是 JSON 字符串，校验有效后直接透传。
+   - 非字符串参数才做序列化，避免 `"{\"cmd\":\"ls\"}"` 变成被再次转义的字符串。
+
+### 6.5 tools 入参兼容策略（m3652api）
+
+`parseOpenAITools` 同时兼容两类输入：
+
+1. Responses 风格（顶层）：
+   - `type` / `name` / `description` / `parameters`
+2. ChatCompletions 风格（嵌套）：
+   - `type="function"` 且 `function.name` / `function.description` / `function.parameters`
+
+此外保留内置工具名回退逻辑（如 `local_shell`）。
+
+### 6.6 当前已覆盖的回归测试点
+
+1. V2 function/custom/multi-block 解析。
+2. V1 JSON fallback 解析。
+3. function arguments 为 JSON string 时不二次编码。
+4. Responses 风格 tools 解析。
+5. ChatCompletions 风格 tools 解析。
+6. 有副作用任务触发强制修复策略。
+
+### 6.7 现阶段边界说明
+
+1. 上游 M365 本质仍是文本对话接口，工具调用能力来自代理协议与解析器，不是上游原生结构化 tool call。
+2. V2 协议已显著降低失败率，但极端情况下仍可能受到上游文本输出质量影响。
+3. 若要进一步提高可观测性，可在后续增加“工具协议调试日志”（仅记录协议片段与解析状态，不记录敏感业务数据）。

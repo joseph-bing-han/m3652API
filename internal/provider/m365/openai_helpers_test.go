@@ -26,3 +26,54 @@ func TestExtractTurnData_ImageURLObject(t *testing.T) {
 		t.Fatalf("unexpected image url: %q", turn.ImageURLs[0])
 	}
 }
+
+func TestParseOpenAITools_ResponsesStyleFunction(t *testing.T) {
+	raw := []byte(`{
+  "tools": [
+    {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run command",
+      "parameters": {"type":"object","properties":{"cmd":{"type":"string"}}}
+    }
+  ]
+}`)
+	tools := parseOpenAITools(raw)
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].ToolType != "function" || tools[0].Name != "exec_command" {
+		t.Fatalf("unexpected tool: %#v", tools[0])
+	}
+	if tools[0].RawJSONSchema == "" {
+		t.Fatalf("expected non-empty schema")
+	}
+}
+
+func TestParseOpenAITools_ChatCompletionsStyleFunction(t *testing.T) {
+	raw := []byte(`{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Write file",
+        "parameters": {"type":"object","properties":{"path":{"type":"string"}}}
+      }
+    },
+    {
+      "type": "local_shell"
+    }
+  ]
+}`)
+	tools := parseOpenAITools(raw)
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[0].Name != "write_file" || tools[0].Description != "Write file" {
+		t.Fatalf("unexpected function tool: %#v", tools[0])
+	}
+	if tools[1].Name != "local_shell" || tools[1].ToolType != "local_shell" {
+		t.Fatalf("unexpected local_shell tool: %#v", tools[1])
+	}
+}
