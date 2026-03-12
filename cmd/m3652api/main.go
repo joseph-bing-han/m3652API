@@ -29,6 +29,10 @@ import (
 	"github.com/joseph/m3652api/internal/provider/m365"
 )
 
+const versionFileName = "version.txt"
+
+var appVersion = loadVersion()
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
@@ -42,6 +46,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(os.Args[2:])
+	case "version", "-v", "--version":
+		printVersion()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -52,15 +58,55 @@ func main() {
 }
 
 func printUsage() {
-	_, _ = fmt.Fprint(os.Stderr, `m3652api - Microsoft 365 Copilot Chat proxy (OpenAI Responses compatible)
+	_, _ = fmt.Fprintf(os.Stderr, `m3652api - Microsoft 365 Copilot Chat proxy (OpenAI Responses compatible)
+Version: %s
 
 Usage:
   m3652api serve -c config.yaml
+  m3652api version
 
 Notes:
   - M365 credentials are loaded from config.yaml under m365.*.
   - The server exposes OpenAI-compatible endpoints under /v1 (Responses API).
-`)
+`, currentVersion())
+}
+
+func printVersion() {
+	_, _ = fmt.Fprintf(os.Stdout, "m3652api version: %s\n", currentVersion())
+}
+
+func currentVersion() string {
+	return appVersion
+}
+
+func loadVersion() string {
+	// 优先从当前工作目录读取，方便本地开发或容器挂载。
+	if version, ok := readVersionFromPath(versionFileName); ok {
+		return version
+	}
+
+	// 退回到可执行文件目录读取，方便发布时随二进制一同分发。
+	execPath, err := os.Executable()
+	if err == nil {
+		execDir := filepath.Dir(execPath)
+		if version, ok := readVersionFromPath(filepath.Join(execDir, versionFileName)); ok {
+			return version
+		}
+	}
+
+	return "unknown"
+}
+
+func readVersionFromPath(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	version := strings.TrimSpace(string(data))
+	if version == "" {
+		return "", false
+	}
+	return version, true
 }
 
 func serve(args []string) {
@@ -326,7 +372,7 @@ func serve(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log.Printf("Starting server with config=%s auth_dir=%s", absConfigPath, cfg.AuthDir)
+	log.Printf("Starting server version=%s config=%s auth_dir=%s", currentVersion(), absConfigPath, cfg.AuthDir)
 	if err := svc.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("Server exited with error: %v", err)
 	}
