@@ -32,6 +32,18 @@ func NewExecutor(cfg *config.Config) *Executor {
 
 func (Executor) Identifier() string { return providerKey }
 
+func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructions, verbosity string, tools []openAITool, toolOutputs, ocrResults []string) m365ChatOverStreamRequest {
+	payload := m365ChatOverStreamRequest{
+		Message:      m365RequestMessage{Text: userTask},
+		LocationHint: m365LocationHint{TimeZone: timeZone},
+		ContextualResource: &m365ContextualResource{
+			WebContext: &m365WebContext{IsWebEnabled: webEnabled},
+		},
+	}
+	payload.AdditionalContext = buildAdditionalContext(instructions, verbosity, tools, toolOutputs, ocrResults)
+	return payload
+}
+
 func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
 	rawReq := opts.OriginalRequest
 	if len(rawReq) == 0 {
@@ -42,8 +54,7 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	if model == "" {
 		model = req.Model
 	}
-	preset := resolveModelPreset(model)
-	model = preset.ModelID
+	model = normalizeModelLabel(model)
 	responseID := "resp_" + uuid.NewString()
 
 	// 定期清理会话（尽力而为）。
@@ -69,10 +80,6 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 
 	inputVal := gjson.GetBytes(rawReq, "input")
 	instructions := gjson.GetBytes(rawReq, "instructions").String()
-	reasoningEffort := gjson.GetBytes(rawReq, "reasoning.effort").String()
-	if strings.TrimSpace(reasoningEffort) == "" {
-		reasoningEffort = preset.DefaultReasoningEffort
-	}
 	verbosity := gjson.GetBytes(rawReq, "text.verbosity").String()
 	toolChoice := strings.TrimSpace(gjson.GetBytes(rawReq, "tool_choice").String())
 
@@ -124,15 +131,7 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 
 	ocrResults := e.buildOCRResults(ctx, a, turn.ImageURLs)
 
-	payload := m365ChatOverStreamRequest{
-		Message:      m365RequestMessage{Text: userTask},
-		LocationHint: m365LocationHint{TimeZone: ai.TimeZone},
-		ContextualResource: &m365ContextualResource{
-			WebContext: &m365WebContext{IsWebEnabled: webEnabled},
-		},
-	}
-
-	payload.AdditionalContext = buildAdditionalContext(instructions, reasoningEffort, verbosity, tools, turn.ToolOutputs, ocrResults)
+	payload := buildUpstreamPayload(userTask, ai.TimeZone, webEnabled, instructions, verbosity, tools, turn.ToolOutputs, ocrResults)
 
 	if strings.TrimSpace(st.conversationID) == "" {
 		convID, err := e.createConversation(ctx, a, accessToken)
@@ -233,8 +232,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		if model == "" {
 			model = req.Model
 		}
-		preset := resolveModelPreset(model)
-		model = preset.ModelID
+		model = normalizeModelLabel(model)
 		responseID := "resp_" + uuid.NewString()
 
 		// 定期清理会话（尽力而为）。
@@ -267,10 +265,6 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 
 		inputVal := gjson.GetBytes(rawReq, "input")
 		instructions := gjson.GetBytes(rawReq, "instructions").String()
-		reasoningEffort := gjson.GetBytes(rawReq, "reasoning.effort").String()
-		if strings.TrimSpace(reasoningEffort) == "" {
-			reasoningEffort = preset.DefaultReasoningEffort
-		}
 		verbosity := gjson.GetBytes(rawReq, "text.verbosity").String()
 		toolChoice := strings.TrimSpace(gjson.GetBytes(rawReq, "tool_choice").String())
 
@@ -322,15 +316,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 
 		ocrResults := e.buildOCRResults(ctx, a, turn.ImageURLs)
 
-		payload := m365ChatOverStreamRequest{
-			Message:      m365RequestMessage{Text: userTask},
-			LocationHint: m365LocationHint{TimeZone: ai.TimeZone},
-			ContextualResource: &m365ContextualResource{
-				WebContext: &m365WebContext{IsWebEnabled: webEnabled},
-			},
-		}
-
-		payload.AdditionalContext = buildAdditionalContext(instructions, reasoningEffort, verbosity, tools, turn.ToolOutputs, ocrResults)
+		payload := buildUpstreamPayload(userTask, ai.TimeZone, webEnabled, instructions, verbosity, tools, turn.ToolOutputs, ocrResults)
 
 		if strings.TrimSpace(st.conversationID) == "" {
 			convID, err := e.createConversation(ctx, a, accessToken)

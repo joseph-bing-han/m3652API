@@ -13,7 +13,7 @@ const (
 	maxSchemaSummaryChar = 240
 )
 
-func buildAdditionalContext(instructions, reasoningEffort, verbosity string, tools []openAITool, toolOutputs []string, ocrResults []string) []m365ContextMessage {
+func buildAdditionalContext(instructions, verbosity string, tools []openAITool, toolOutputs []string, ocrResults []string) []m365ContextMessage {
 	out := make([]m365ContextMessage, 0, 6)
 
 	sys := strings.TrimSpace(strings.Join([]string{
@@ -27,10 +27,10 @@ func buildAdditionalContext(instructions, reasoningEffort, verbosity string, too
 		})
 	}
 
-	style := strings.TrimSpace(buildStyleHints(reasoningEffort, verbosity))
+	style := strings.TrimSpace(buildVerbosityHints(verbosity))
 	if style != "" {
 		out = append(out, m365ContextMessage{
-			Description: "Reasoning/verbosity",
+			Description: "Output style",
 			Text:        truncateMiddle(style, maxContextBlockChars),
 		})
 	}
@@ -78,24 +78,10 @@ Requirements:
 `)
 }
 
-func buildStyleHints(reasoningEffort, verbosity string) string {
-	reasoningEffort = strings.ToLower(strings.TrimSpace(reasoningEffort))
+func buildVerbosityHints(verbosity string) string {
 	verbosity = strings.ToLower(strings.TrimSpace(verbosity))
 
 	var parts []string
-	if reasoningEffort != "" {
-		switch reasoningEffort {
-		case "none", "low":
-			parts = append(parts, "Reasoning effort: low. Be concise and fast.")
-		case "medium":
-			parts = append(parts, "Reasoning effort: medium. Be structured and practical.")
-		case "high", "xhigh":
-			parts = append(parts, "Reasoning effort: high. Be thorough and check edge cases.")
-		default:
-			parts = append(parts, fmt.Sprintf("Reasoning effort: %s.", reasoningEffort))
-		}
-	}
-
 	if verbosity != "" {
 		parts = append(parts, fmt.Sprintf("Verbosity: %s.", verbosity))
 	}

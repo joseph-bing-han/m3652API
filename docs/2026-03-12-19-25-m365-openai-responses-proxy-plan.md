@@ -20,7 +20,7 @@
    - 正常流式输出（SSE）
    - 正常发起并处理工具调用（function/custom/local_shell 等）
    - 正常处理图片输入（至少不报错，并提供可解释的降级行为）
-   - 支持模型选择与“思考等级”（`reasoning.effort`）参数（允许降级实现，但接口必须兼容）
+   - 兼容接收模型选择与“思考等级”（`reasoning.effort`）参数，但它们不会改变微软上游请求行为
 3. **上游为 M365 Copilot Chat API**：代理内部通过 Graph beta 的 Copilot Chat API 完成对话与流式生成（`chatOverStream` 优先）。
 
 
@@ -480,15 +480,11 @@ M365 Copilot Chat API 的主路径并不保证支持图片输入。为满足 Cod
 
 ### 6.4 难点 D：模型选择与思考等级
 
-M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 参数映射”：
+M365 并无 OpenAI 同构的 `reasoning.effort`，当前实现采取“兼容接收但统一映射”的策略：
 
-- 对外暴露多个 model id（例如 `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`）
-- 接收 `reasoning.effort` 时，在注入到 M365 的提示词中转换为行为约束，例如：
-  - `none/low`：强调简洁、快速给结论
-  - `medium`：强调分步骤，但不输出冗长过程
-  - `high/xhigh`：强调多角度核对、输出更完整计划与风险
-
-并允许通过配置把某些 model alias 固定映射到特定 effort（类似“模型别名 + 思考等级预设”）。
+- 对外仍暴露多个 model id（例如 `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`），用于兼容客户端模型选择界面与已有配置
+- 所有 model alias 最终都映射到相同的 Microsoft Graph Copilot Chat API 调用路径
+- `reasoning.effort` 仅做协议兼容，不参与提示词构造，也不会改变上游请求
 
 
 ## 7. API 设计（对外 OpenAI 兼容层）
@@ -590,9 +586,9 @@ M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 
 | --- | --- | --- |
 | `stream` | 端点选择 | `true` → `chatOverStream`；`false` → 400 或降级 `chat` |
 | `prompt_cache_key` | `conversationId`（会话映射 key） | 作为 sessionKey 查表；无绑定则创建会话并写回绑定 |
-| `model` | 无直接同构字段 | 选择“虚拟模型 preset”（见 6.4）；影响 effort / web / tool 目录裁剪 |
+| `model` | 无直接同构字段 | 仅作为 OpenAI 兼容层标签使用；不改变微软上游请求 |
 | `instructions` | `additionalContext[]` | 作为 `System instructions` 注入（不要塞进 `message.text`） |
-| `reasoning.effort` | `additionalContext[]` | 转成行为约束（fast/normal/deep），用于提示词；无则用 model preset 默认 |
+| `reasoning.effort` | 无映射 | 协议兼容接收，但直接忽略，不参与上游请求构造 |
 | `text.verbosity` | `additionalContext[]` | 转成输出风格约束（brief/normal/verbose） |
 | `text.format`（含 `json_schema`） | `additionalContext[]` | 仅能“提示词约束”，无法强保证；必要时加“只输出 JSON”规则 |
 | `tool_choice` | `additionalContext[]` | `none`：显式禁止工具；`auto`：允许；指定工具：要求优先调用该工具 |
@@ -602,7 +598,7 @@ M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 
 | `input[]` → `message(role=user)` | `message.text` | 取“本轮新增 items”里的最后一条 user message 作为 user task（见后文增量算法） |
 | `input[]` → `function_call_output` / `custom_tool_call_output` | `additionalContext[]` | 作为 `Tool outputs` 注入；强制截断并保留结构边界 |
 | `input[]` → `message` 中的 `input_image` | OCR → `additionalContext[]` | 解码 data URL → OCR → 注入 `Image OCR #n`（必须有结果或明确错误文本） |
-| （自定义）web 开关（例如请求 `metadata.web_enabled`） | `contextualResources.webContext.isWebEnabled` | 默认 `true`；可按 model preset / 配置 / 自定义字段覆盖；注意是单轮开关 |
+| （自定义）web 开关（例如请求 `metadata.web_enabled`） | `contextualResources.webContext.isWebEnabled` | 默认 `true`；可按配置 / 自定义字段覆盖；注意是单轮开关 |
 | （可选）文件 URI（非本地文件） | `contextualResources.files[]` | 仅支持 OneDrive/SharePoint 可访问 `uri`；本地文件必须走工具读取并注入文本 |
 | （代理配置）时区 | `locationHint.timeZone` | 必填；优先代理配置 IANA 时区（例如 `Asia/Shanghai`） |
 
@@ -624,7 +620,7 @@ M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 
    - 若本轮没有新增 user message（常见于“工具输出 → 继续推理”的自动回合）：使用合成文本作为 `message.text`，例如 `"Continue."`
 4. 本轮 `additionalContext` 的来源：
    - 从 `newItems` 中收集所有 `function_call_output/custom_tool_call_output/...`，统一编码成 `Tool outputs`
-   - 同时注入工具目录/协议、effort/verbosity、OCR 结果（见下）
+   - 同时注入工具目录/协议、verbosity、OCR 结果（见下）
 5. 当本轮上游请求成功发出后：更新 `processed_input_len = len(input)`
 
 
@@ -633,7 +629,7 @@ M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 
 建议每轮固定生成以下 4~6 个 `copilotContextMessage`，以便稳定调试与逐项截断（顺序建议保持一致）：
 
 1. `description="System instructions"`：来自 `instructions` + 代理固定基座（英文）
-2. `description="Reasoning/verbosity"`：来自 `reasoning.effort`、`text.verbosity` 的行为约束（英文）
+2. `description="Output style"`：来自 `text.verbosity` 的输出风格约束（英文）
 3. `description="Tool calling protocol"`：工具调用文本协议（英文，要求输出严格 JSON）
 4. `description="Available tools"`：从 `tools[]` 编码出的工具目录（英文，必要时裁剪）
 5. `description="Tool outputs"`：从 `function_call_output/...` 编码的工具结果（英文，必须截断）
@@ -705,7 +701,7 @@ M365 并无 OpenAI 同构的 `reasoning.effort`。因此需要“虚拟模型 + 
   "contextualResources": { "webContext": { "isWebEnabled": true } },
   "additionalContext": [
     { "description": "System instructions", "text": "You are a helpful coding agent. Use tools when needed." },
-    { "description": "Reasoning/verbosity", "text": "Reasoning effort: high. Be thorough and check edge cases." },
+    { "description": "Output style", "text": "Verbosity: verbose." },
     { "description": "Tool calling protocol", "text": "When you need to use a tool, output a single JSON object with keys: tool_name, arguments. Do not add extra text." },
     { "description": "Available tools", "text": "Tool: exec_command\nDescription: Run a shell command and return stdout/stderr.\nParameters JSON Schema: {\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}},\"required\":[\"cmd\"]}" },
     { "description": "Image OCR results", "text": "Image #1 OCR text:\n...(truncated)..." }
@@ -789,11 +785,13 @@ m365:
 
 models:
   - id: "gpt-5.2-codex"
-    display_name: "GPT-5.2 Codex (M365 Fast Response)"
-    reasoning_effort_default: "low"
+    display_name: "GPT-5.2 Codex (M365 Compatible Alias)"
   - id: "gpt-5.2"
-    display_name: "GPT-5.2 (M365 Think Deeper)"
-    reasoning_effort_default: "high"
+    display_name: "GPT-5.2 (M365 Compatible Alias)"
+  - id: "gpt-5.3-codex"
+    display_name: "GPT-5.3 Codex (M365 Compatible Alias)"
+  - id: "gpt-5.4"
+    display_name: "GPT-5.4 (M365 Compatible Alias)"
 
 compat:
   supports_websocket: false
@@ -809,7 +807,6 @@ compat:
 ```toml
 model_provider = "m365"
 model = "gpt-5.2-codex"
-model_reasoning_effort = "medium"
 
 [model_providers.m365]
 name = "M365 Copilot Proxy"
@@ -908,7 +905,7 @@ stream_idle_timeout_ms = 300000
 
 ### 阶段 3：兼容性完善（3–7 天）
 
-1. `GET /v1/models`（虚拟模型 + alias + effort preset）
+1. `GET /v1/models`（兼容模型别名列表）
 2. `POST /v1/responses/compact`（最小可用 + 后续增强）
 3. 图片输入策略（disabled/ocr/caption）
 4. 更完整的错误映射（401/403/429/5xx → `response.failed`/HTTP error）

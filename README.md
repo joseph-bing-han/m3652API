@@ -7,7 +7,7 @@
 - HTTP SSE 流式输出（不强依赖 WebSocket）
 - 工具调用闭环（function/custom/local_shell）
 - 图片输入降级（OCR 识别 → 文本注入给上游）
-- `GET /v1/models` 模型列表与模型选择
+- `GET /v1/models` 兼容模型别名列表（用于客户端探测与配置，不会切换微软上游真实模型）
 
 
 ## 前置条件
@@ -93,14 +93,21 @@ export OPENAI_BASE_URL="http://localhost:8217/v1"
 export OPENAI_API_KEY="change-me"
 ```
 
-然后正常运行 `codex`，并选择模型，例如：
+然后正常运行 `codex`，并指定一个**兼容模型别名**，例如：
 
-- `gpt-5.2-codex`（对应 M365 “GPT-5.2 快速响应”）
-- `gpt-5.2`（对应 M365 “GPT-5.2 深度思考”）
-- `gpt-5.3-codex`（对应 M365 “GPT-5.3 Quick response”）
-- `gpt-5.4`（对应 M365 “GPT-5.4 Think deeper”）
+- `gpt-5.2-codex`
+- `gpt-5.2`
+- `gpt-5.3-codex`
+- `gpt-5.4`
 
-提示：当 `OPENAI_BASE_URL` 指向非官方 OpenAI 地址时，Codex CLI 的“模型选择/拉取模型列表”行为可能依赖服务端对 `/v1/models` 的实现，本项目已提供虚拟模型列表以提高兼容性。
+注意：
+
+- 这些 `model` 值是**代理层兼容别名**，主要用于适配 Codex CLI / OpenAI 兼容生态。
+- 当前实现里，所有兼容模型别名都会映射到**相同的 Microsoft Graph Copilot Chat API** 调用路径。
+- `reasoning.effort` 会被兼容接收，但**不会影响微软上游请求**，当前实现会直接忽略它。
+- `response.model` 仍会返回兼容层模型标签，用于维持 OpenAI 兼容接口行为；它不代表微软上游真实模型。
+
+提示：当 `OPENAI_BASE_URL` 指向非官方 OpenAI 地址时，Codex CLI 的“读取模型列表”行为可能依赖服务端对 `/v1/models` 的实现，本项目提供的是**兼容性模型别名列表**，以提高客户端接入兼容性。
 
 
 ## OCR 说明

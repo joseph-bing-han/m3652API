@@ -13,10 +13,10 @@ func RegisterModels(core *coreauth.Manager) {
 	}
 
 	models := []*cliproxy.ModelInfo{
-		{ID: "gpt-5.2-codex", Object: "model", Type: providerKey, DisplayName: "GPT-5.2 Codex (M365 Fast Response)"},
-		{ID: "gpt-5.2", Object: "model", Type: providerKey, DisplayName: "GPT-5.2 (M365 Think Deeper)"},
-		{ID: "gpt-5.3-codex", Object: "model", Type: providerKey, DisplayName: "GPT-5.3 Codex (M365 Quick Response)"},
-		{ID: "gpt-5.4", Object: "model", Type: providerKey, DisplayName: "GPT-5.4 (M365 Think Deeper)"},
+		{ID: "gpt-5.2-codex", Object: "model", Type: providerKey, DisplayName: "GPT-5.2 Codex (M365 Compatible Alias)"},
+		{ID: "gpt-5.2", Object: "model", Type: providerKey, DisplayName: "GPT-5.2 (M365 Compatible Alias)"},
+		{ID: "gpt-5.3-codex", Object: "model", Type: providerKey, DisplayName: "GPT-5.3 Codex (M365 Compatible Alias)"},
+		{ID: "gpt-5.4", Object: "model", Type: providerKey, DisplayName: "GPT-5.4 (M365 Compatible Alias)"},
 	}
 
 	for _, a := range core.List() {
