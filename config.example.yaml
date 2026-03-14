@@ -39,6 +39,7 @@ m365:
   #   - "openid"
   #   - "profile"
   #   - "offline_access"
+  #   - "https://graph.microsoft.com/Files.ReadWrite.AppFolder"
   #   - "https://graph.microsoft.com/User.Read"
   #   - "https://graph.microsoft.com/Sites.Read.All"
   #   - "https://graph.microsoft.com/Mail.Read"
@@ -47,6 +48,11 @@ m365:
   #   - "https://graph.microsoft.com/Chat.Read"
   #   - "https://graph.microsoft.com/ChannelMessage.Read.All"
   #   - "https://graph.microsoft.com/ExternalItem.Read.All"
+  image-upload:
+    enabled: false
+    target: "sharepoint"
+    sharepoint-hostname: "contoso.sharepoint.com"
+    sharepoint-site-path: "/sites/Engineering"
 
 # Keep WebSocket auth disabled; this project focuses on HTTP SSE.
 ws-auth: false

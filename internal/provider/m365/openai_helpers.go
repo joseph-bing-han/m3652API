@@ -2,10 +2,8 @@ package m365
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -78,8 +76,6 @@ type turnExtract struct {
 	ImageURLs    []string
 	ToolOutputs  []string
 }
-
-const unsupportedImageInputMessage = "input_image is not supported by this provider: Microsoft Graph Copilot Chat API does not accept direct image payloads"
 
 func extractTurnData(newItems []gjson.Result) turnExtract {
 	var userTextParts []string
@@ -183,56 +179,12 @@ func extractPendingTurn(inputVal gjson.Result, st *sessionState) (turnExtract, i
 	return extractTurnData(newItems), nextProcessedLen, resetConversation
 }
 
-func validateNoImageInputs(imageURLs []string) error {
-	if len(imageURLs) == 0 {
-		return nil
-	}
-	return &coreauth.Error{
-		Message:    unsupportedImageInputMessage,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-func validateNoImageInput(rawRequest []byte) error {
-	if !requestContainsImageInput(rawRequest) {
-		return nil
-	}
-	return &coreauth.Error{
-		Message:    unsupportedImageInputMessage,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
 func buildToolOutputLine(callID, outText string) string {
 	callID = strings.TrimSpace(callID)
 	if callID == "" {
 		return outText
 	}
 	return "call_id=" + callID + "\n" + outText
-}
-
-func requestContainsImageInput(rawRequest []byte) bool {
-	input := gjson.GetBytes(rawRequest, "input")
-	if !input.Exists() || !input.IsArray() {
-		return false
-	}
-
-	for _, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "message" {
-			continue
-		}
-		content := item.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-		for _, part := range content.Array() {
-			if strings.TrimSpace(part.Get("type").String()) == "input_image" {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 func jsonString(v any) (string, bool) {

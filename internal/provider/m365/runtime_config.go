@@ -10,15 +10,23 @@ import (
 )
 
 type RuntimeConfig struct {
-	AuthID          string   `yaml:"auth-id"`
-	TenantID        string   `yaml:"tenant-id"`
-	ClientID        string   `yaml:"client-id"`
-	ClientSecret    string   `yaml:"client-secret"`
-	TimeZone        string   `yaml:"timezone"`
-	Scopes          []string `yaml:"scopes"`
-	DelegatedScopes []string `yaml:"delegated-scopes"`
-	RedirectURI     string   `yaml:"redirect-uri"`
-	AuthorizePrompt string   `yaml:"authorize-prompt"`
+	AuthID          string            `yaml:"auth-id"`
+	TenantID        string            `yaml:"tenant-id"`
+	ClientID        string            `yaml:"client-id"`
+	ClientSecret    string            `yaml:"client-secret"`
+	TimeZone        string            `yaml:"timezone"`
+	Scopes          []string          `yaml:"scopes"`
+	DelegatedScopes []string          `yaml:"delegated-scopes"`
+	RedirectURI     string            `yaml:"redirect-uri"`
+	AuthorizePrompt string            `yaml:"authorize-prompt"`
+	ImageUpload     ImageUploadConfig `yaml:"image-upload"`
+}
+
+type ImageUploadConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	Target             string `yaml:"target"`
+	SharePointHostname string `yaml:"sharepoint-hostname"`
+	SharePointSitePath string `yaml:"sharepoint-site-path"`
 }
 
 type runtimeConfigFile struct {
@@ -51,6 +59,7 @@ func LoadRuntimeConfig(configPath string) (RuntimeConfig, error) {
 	cfg.DelegatedScopes = sanitizeScopes(cfg.DelegatedScopes)
 	cfg.RedirectURI = strings.TrimSpace(cfg.RedirectURI)
 	cfg.AuthorizePrompt = strings.TrimSpace(cfg.AuthorizePrompt)
+	cfg.ImageUpload = sanitizeImageUploadConfig(cfg.ImageUpload)
 
 	if cfg.AuthID == "" {
 		cfg.AuthID = "m365-static"
@@ -72,4 +81,22 @@ func LoadRuntimeConfig(configPath string) (RuntimeConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func sanitizeImageUploadConfig(cfg ImageUploadConfig) ImageUploadConfig {
+	cfg.Target = strings.ToLower(strings.TrimSpace(cfg.Target))
+	cfg.SharePointHostname = strings.TrimSpace(cfg.SharePointHostname)
+	cfg.SharePointSitePath = normalizeSharePointSitePath(cfg.SharePointSitePath)
+	return cfg
+}
+
+func normalizeSharePointSitePath(sitePath string) string {
+	sitePath = strings.TrimSpace(sitePath)
+	if sitePath == "" {
+		return ""
+	}
+	if !strings.HasPrefix(sitePath, "/") {
+		sitePath = "/" + sitePath
+	}
+	return strings.TrimRight(sitePath, "/")
 }

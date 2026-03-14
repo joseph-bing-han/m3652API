@@ -107,11 +107,55 @@ export OPENAI_API_KEY="change-me"
 提示：当 `OPENAI_BASE_URL` 指向非官方 OpenAI 地址时，Codex CLI 的“读取模型列表”行为可能依赖服务端对 `/v1/models` 的实现，本项目提供的是**兼容性模型别名列表**，以提高客户端接入兼容性。
 
 
-## 图片输入限制
+## 图片输入
 
-- 当前实现**不支持** OpenAI Responses 风格的 `input_image`。
-- 当 Codex CLI 传入图片时，代理会直接返回 `400 invalid_request_error`，不会再尝试本地 OCR，也不会把图片上传或转发到微软上游。
-- 当前微软上游集成在本项目里只走文本消息路径；如需分析图片，请先将图片内容转换为文本描述后再发送。
+当前实现支持将 Codex CLI 传入的 `input_image` 转成 SharePoint app folder 文件，再通过 `contextualResources.files[].uri` 交给 Microsoft Graph Copilot Chat API。
+
+限制与要求：
+
+- 只支持 **`data:image/...;base64,...`** 形式的内联图片。
+- **不支持** 远程 `http/https` 图片 URL，代理不会代替服务端抓取外部图片。
+- 单张图片上限为 **10 MiB**。
+- 需要在 `m365.image-upload` 中启用 SharePoint 上传配置：
+
+```yaml
+m365:
+  image-upload:
+    enabled: true
+    target: "sharepoint"
+    sharepoint-hostname: "contoso.sharepoint.com"
+    sharepoint-site-path: "/sites/Engineering"
+```
+
+- 委派权限中必须包含：
+
+```text
+https://graph.microsoft.com/Files.ReadWrite.AppFolder
+```
+
+- 如果你是在已有配置上新增图片能力，更新 delegated scopes 后需要重新访问：
+
+```text
+http://localhost:8217/m365/oauth/start
+```
+
+图片处理流程：
+
+1. 代理解析 `input_image`
+2. 上传到配置好的 SharePoint site 默认 drive 的 `special/approot`
+3. 取上传后文件的 `webUrl`
+4. 注入到 `chatOverStream.contextualResources.files[]`
+5. 请求完成后最佳努力删除临时上传文件
+
+可通过以下状态接口检查是否具备图片上传条件：
+
+- `image_upload_enabled`
+- `image_upload_target`
+- `image_upload_required_scope`
+- `image_upload_scope_ready`
+- `sharepoint_site_configured`
+
+以上字段可在 `GET /m365/oauth/status` 中查看。
 
 
 ## 重要限制与安全提示

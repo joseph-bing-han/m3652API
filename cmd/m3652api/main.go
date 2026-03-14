@@ -269,6 +269,18 @@ func serve(args []string) {
 					var expiresAt int64
 					var obtainedAt int64
 					var scope string
+					imageUploadScopeConfigured := false
+					imageUploadTokenScopeReady := false
+					sharePointSiteConfigured := strings.EqualFold(strings.TrimSpace(runtimeCfg.ImageUpload.Target), "sharepoint") &&
+						strings.TrimSpace(runtimeCfg.ImageUpload.SharePointHostname) != "" &&
+						strings.TrimSpace(runtimeCfg.ImageUpload.SharePointSitePath) != ""
+
+					for _, delegatedScope := range runtimeCfg.DelegatedScopes {
+						if strings.EqualFold(strings.TrimSpace(delegatedScope), m365.ImageUploadRequiredScope) {
+							imageUploadScopeConfigured = true
+							break
+						}
+					}
 
 					if md := a.Metadata; md != nil {
 						if tokenMap, ok := md["token"].(map[string]any); ok && tokenMap != nil {
@@ -291,17 +303,31 @@ func serve(args []string) {
 						}
 					}
 
+					if imageUploadScopeConfigured {
+						for _, tokenScope := range strings.Fields(scope) {
+							if strings.EqualFold(strings.TrimSpace(tokenScope), m365.ImageUploadRequiredScope) {
+								imageUploadTokenScopeReady = true
+								break
+							}
+						}
+					}
+
 					c.JSON(http.StatusOK, gin.H{
-						"auth_id":            a.ID,
-						"provider":           a.Provider,
-						"has_refresh_token":  refreshToken != "",
-						"token_expires_at":   expiresAt,
-						"token_obtained_at":  obtainedAt,
-						"token_scope":        scope,
-						"redirect_uri_hint":  redirectURIHint,
-						"delegated_scopes":   runtimeCfg.DelegatedScopes,
-						"app_scopes":         runtimeCfg.Scopes,
-						"authorize_endpoint": fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/authorize", runtimeCfg.TenantID),
+						"auth_id":                     a.ID,
+						"provider":                    a.Provider,
+						"has_refresh_token":           refreshToken != "",
+						"token_expires_at":            expiresAt,
+						"token_obtained_at":           obtainedAt,
+						"token_scope":                 scope,
+						"redirect_uri_hint":           redirectURIHint,
+						"delegated_scopes":            runtimeCfg.DelegatedScopes,
+						"app_scopes":                  runtimeCfg.Scopes,
+						"authorize_endpoint":          fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/authorize", runtimeCfg.TenantID),
+						"image_upload_enabled":        runtimeCfg.ImageUpload.Enabled,
+						"image_upload_target":         runtimeCfg.ImageUpload.Target,
+						"image_upload_required_scope": m365.ImageUploadRequiredScope,
+						"image_upload_scope_ready":    runtimeCfg.ImageUpload.Enabled && sharePointSiteConfigured && imageUploadScopeConfigured && imageUploadTokenScopeReady,
+						"sharepoint_site_configured":  sharePointSiteConfigured,
 					})
 				})
 

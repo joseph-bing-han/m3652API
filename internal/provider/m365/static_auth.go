@@ -44,6 +44,12 @@ func EnsureStaticAuth(ctx context.Context, core *coreauth.Manager, runtime Runti
 		cloned.Metadata["timezone"] = runtime.TimeZone
 		cloned.Metadata["scopes"] = runtime.Scopes
 		cloned.Metadata["delegated_scopes"] = runtime.DelegatedScopes
+		cloned.Metadata["image_upload"] = map[string]any{
+			"enabled":              runtime.ImageUpload.Enabled,
+			"target":               runtime.ImageUpload.Target,
+			"sharepoint_hostname":  runtime.ImageUpload.SharePointHostname,
+			"sharepoint_site_path": runtime.ImageUpload.SharePointSitePath,
+		}
 		return cloned
 	}
 

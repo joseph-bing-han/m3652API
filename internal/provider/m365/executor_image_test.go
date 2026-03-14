@@ -5,15 +5,16 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-func TestValidateNoImageInputs_RejectsImageRequests(t *testing.T) {
-	err := validateNoImageInputs([]string{"data:image/png;base64,AAAA"})
+func TestDecodeDataURLImage_RejectsRemoteURL(t *testing.T) {
+	_, _, err := decodeDataURLImage("https://example.com/image.png")
 	if err == nil {
-		t.Fatal("expected image validation error")
+		t.Fatal("expected decode error")
 	}
 
 	var authErr *coreauth.Error
@@ -23,12 +24,9 @@ func TestValidateNoImageInputs_RejectsImageRequests(t *testing.T) {
 	if authErr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("unexpected status: %d", authErr.HTTPStatus)
 	}
-	if authErr.Message != unsupportedImageInputMessage {
-		t.Fatalf("unexpected message: %q", authErr.Message)
-	}
 }
 
-func TestExecute_RejectsImageInputBeforeAuth(t *testing.T) {
+func TestExecute_RejectsImageInputWhenUploadDisabled(t *testing.T) {
 	raw := []byte(`{
   "prompt_cache_key": "image-session",
   "model": "gpt-5.2",
@@ -44,8 +42,9 @@ func TestExecute_RejectsImageInputBeforeAuth(t *testing.T) {
   ]
 }`)
 
+	auth := testImageUploadAuth(false, true)
 	e := NewExecutor(nil)
-	_, err := e.Execute(context.Background(), nil, clipexec.Request{}, clipexec.Options{OriginalRequest: raw})
+	_, err := e.Execute(context.Background(), auth, clipexec.Request{}, clipexec.Options{OriginalRequest: raw})
 	if err == nil {
 		t.Fatal("expected execute to fail")
 	}
@@ -57,10 +56,44 @@ func TestExecute_RejectsImageInputBeforeAuth(t *testing.T) {
 	if authErr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("unexpected status: %d", authErr.HTTPStatus)
 	}
-	assertSessionNotCreatedAfterImageRejection(t, e, "image-session")
+	if authErr.Code != "invalid_request_error" {
+		t.Fatalf("unexpected code: %q", authErr.Code)
+	}
 }
 
-func TestExecuteStream_RejectsImageInputBeforeStreamingStarts(t *testing.T) {
+func TestExecute_RejectsImageInputWhenUploadScopeMissing(t *testing.T) {
+	raw := []byte(`{
+  "prompt_cache_key": "image-session-scope",
+  "model": "gpt-5.2",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "input_image", "image_url": {"url": "data:image/png;base64,AAAA"}}
+      ]
+    }
+  ]
+}`)
+
+	auth := testImageUploadAuth(true, false)
+	e := NewExecutor(nil)
+	_, err := e.Execute(context.Background(), auth, clipexec.Request{}, clipexec.Options{OriginalRequest: raw})
+	if err == nil {
+		t.Fatal("expected execute to fail")
+	}
+
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("expected *coreauth.Error, got %T", err)
+	}
+	if authErr.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("unexpected status: %d", authErr.HTTPStatus)
+	}
+}
+
+func TestExecuteStream_RejectsImageInputBeforeStreamingStartsWhenUploadDisabled(t *testing.T) {
 	raw := []byte(`{
   "prompt_cache_key": "image-session-stream",
   "model": "gpt-5.2",
@@ -77,13 +110,14 @@ func TestExecuteStream_RejectsImageInputBeforeStreamingStarts(t *testing.T) {
   ]
 }`)
 
+	auth := testImageUploadAuth(false, true)
 	e := NewExecutor(nil)
-	result, err := e.ExecuteStream(context.Background(), nil, clipexec.Request{}, clipexec.Options{OriginalRequest: raw})
+	result, err := e.ExecuteStream(context.Background(), auth, clipexec.Request{}, clipexec.Options{OriginalRequest: raw})
 	if err == nil {
 		t.Fatal("expected execute stream to fail")
 	}
 	if result != nil {
-		t.Fatal("expected no stream result on image validation failure")
+		t.Fatal("expected no stream result on upload validation failure")
 	}
 
 	var authErr *coreauth.Error
@@ -93,20 +127,34 @@ func TestExecuteStream_RejectsImageInputBeforeStreamingStarts(t *testing.T) {
 	if authErr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("unexpected status: %d", authErr.HTTPStatus)
 	}
-	assertSessionNotCreatedAfterImageRejection(t, e, "image-session-stream")
 }
 
-func assertSessionNotCreatedAfterImageRejection(t *testing.T, e *Executor, sessionKey string) {
-	t.Helper()
-
-	if e == nil || e.sessions == nil {
-		t.Fatal("expected session store to exist")
+func testImageUploadAuth(uploadEnabled, includeRequiredScope bool) *coreauth.Auth {
+	delegatedScopes := []string{"openid", "profile"}
+	scopeValue := "openid profile"
+	if includeRequiredScope {
+		delegatedScopes = append(delegatedScopes, ImageUploadRequiredScope)
+		scopeValue += " " + ImageUploadRequiredScope
 	}
 
-	e.sessions.mu.Lock()
-	defer e.sessions.mu.Unlock()
-
-	if _, ok := e.sessions.sessions[sessionKey]; ok {
-		t.Fatalf("expected session %q to not be created", sessionKey)
+	return &coreauth.Auth{
+		Metadata: map[string]any{
+			"tenant_id":        "tenant-id",
+			"client_id":        "client-id",
+			"client_secret":    "client-secret",
+			"timezone":         "Pacific/Auckland",
+			"delegated_scopes": delegatedScopes,
+			"token": map[string]any{
+				"access_token": "token",
+				"scope":        scopeValue,
+				"expires_at":   time.Now().Add(10 * time.Minute).Unix(),
+			},
+			"image_upload": map[string]any{
+				"enabled":              uploadEnabled,
+				"target":               imageUploadTargetSharePoint,
+				"sharepoint_hostname":  "contoso.sharepoint.com",
+				"sharepoint_site_path": "/sites/Engineering",
+			},
+		},
 	}
 }

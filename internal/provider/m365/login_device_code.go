@@ -131,6 +131,7 @@ func defaultDelegatedScopes() []string {
 		"openid",
 		"profile",
 		"offline_access",
+		"https://graph.microsoft.com/Files.ReadWrite.AppFolder",
 		"https://graph.microsoft.com/User.Read",
 		"https://graph.microsoft.com/Sites.Read.All",
 		"https://graph.microsoft.com/Mail.Read",

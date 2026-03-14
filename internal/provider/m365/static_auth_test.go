@@ -77,6 +77,12 @@ func TestEnsureStaticAuth_PreservesTokenMetadata(t *testing.T) {
 		TimeZone:        "Pacific/Auckland",
 		Scopes:          []string{"https://graph.microsoft.com/.default"},
 		DelegatedScopes: []string{"openid", "profile", "offline_access"},
+		ImageUpload: ImageUploadConfig{
+			Enabled:            true,
+			Target:             imageUploadTargetSharePoint,
+			SharePointHostname: "contoso.sharepoint.com",
+			SharePointSitePath: "/sites/Engineering",
+		},
 	}
 
 	out, err := EnsureStaticAuth(context.Background(), core, runtime, "")
@@ -95,5 +101,15 @@ func TestEnsureStaticAuth_PreservesTokenMetadata(t *testing.T) {
 	}
 	if out.Metadata["client_secret"] != "s2" {
 		t.Fatalf("expected client_secret to be updated, got %v", out.Metadata["client_secret"])
+	}
+	imageUpload, _ := out.Metadata["image_upload"].(map[string]any)
+	if imageUpload == nil {
+		t.Fatalf("expected image_upload metadata to exist")
+	}
+	if imageUpload["enabled"] != true {
+		t.Fatalf("expected image upload to be enabled, got %v", imageUpload["enabled"])
+	}
+	if imageUpload["sharepoint_site_path"] != "/sites/Engineering" {
+		t.Fatalf("unexpected sharepoint site path: %v", imageUpload["sharepoint_site_path"])
 	}
 }

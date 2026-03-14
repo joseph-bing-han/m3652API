@@ -18,7 +18,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-const graphBaseURL = "https://graph.microsoft.com"
+var graphBaseURL = "https://graph.microsoft.com"
 
 // NewHTTPClientForProxyURL 根据 proxy URL 构建 HTTP 客户端。
 // 支持 http/https/socks5；为空或非法时返回 http.DefaultClient。

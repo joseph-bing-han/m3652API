@@ -32,13 +32,16 @@ func NewExecutor(cfg *config.Config) *Executor {
 
 func (Executor) Identifier() string { return providerKey }
 
-func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructions, verbosity string, tools []openAITool, toolOutputs []string) m365ChatOverStreamRequest {
+func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructions, verbosity string, tools []openAITool, toolOutputs []string, files []m365File) m365ChatOverStreamRequest {
 	payload := m365ChatOverStreamRequest{
 		Message:      m365RequestMessage{Text: userTask},
 		LocationHint: m365LocationHint{TimeZone: timeZone},
 		ContextualResource: &m365ContextualResource{
 			WebContext: &m365WebContext{IsWebEnabled: webEnabled},
 		},
+	}
+	if len(files) > 0 {
+		payload.ContextualResource.Files = append([]m365File(nil), files...)
 	}
 	payload.AdditionalContext = buildAdditionalContext(instructions, verbosity, tools, toolOutputs)
 	return payload
@@ -111,9 +114,6 @@ func (e *Executor) prepareTurnState(req clipexec.Request, opts clipexec.Options)
 	}
 
 	turn, nextProcessedLen, resetConversation := extractPendingTurn(inputVal, st)
-	if err := validateNoImageInputs(turn.ImageURLs); err != nil {
-		return preparedTurnState{}, err
-	}
 
 	if resetConversation {
 		st.processedInputLen = 0
@@ -162,27 +162,37 @@ func resolveUserTask(turn turnExtract, inputVal gjson.Result) string {
 }
 
 func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
-	rawReq := opts.OriginalRequest
-	if len(rawReq) == 0 {
-		rawReq = req.Payload
-	}
-	if err := validateNoImageInput(rawReq); err != nil {
-		return clipexec.Response{}, err
-	}
-
 	state, err := e.prepareTurnState(req, opts)
 	if err != nil {
 		return clipexec.Response{}, err
 	}
 	defer state.end()
 
-	ai, accessToken, err := e.ensureAccessToken(ctx, a)
-	if err != nil {
-		return clipexec.Response{}, err
+	var (
+		ai          authInfo
+		accessToken string
+		uploaded    uploadedTurnFiles
+	)
+
+	if len(state.turn.ImageURLs) > 0 {
+		ai, accessToken, err = e.ensureImageUploadAccessToken(ctx, a)
+		if err != nil {
+			return clipexec.Response{}, err
+		}
+		uploaded, err = e.prepareUploadedTurnFiles(ctx, a, accessToken, state.turn.ImageURLs)
+		if err != nil {
+			return clipexec.Response{}, err
+		}
+		defer e.cleanupUploadedTurnFiles(nil, a, accessToken, uploaded)
+	} else {
+		ai, accessToken, err = e.ensureAccessToken(ctx, a)
+		if err != nil {
+			return clipexec.Response{}, err
+		}
 	}
 
 	userTask := resolveUserTask(state.turn, state.inputVal)
-	payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs)
+	payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs, uploaded.Files)
 
 	if strings.TrimSpace(state.st.conversationID) == "" {
 		convID, err := e.createConversation(ctx, a, accessToken)
@@ -269,17 +279,30 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 }
 
 func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (*clipexec.StreamResult, error) {
-	rawReq := opts.OriginalRequest
-	if len(rawReq) == 0 {
-		rawReq = req.Payload
-	}
-	if err := validateNoImageInput(rawReq); err != nil {
-		return nil, err
-	}
-
 	state, err := e.prepareTurnState(req, opts)
 	if err != nil {
 		return nil, err
+	}
+
+	var (
+		preflightAI          authInfo
+		preflightAccessToken string
+		preflightUploaded    uploadedTurnFiles
+		hasImageUploads      bool
+	)
+
+	if len(state.turn.ImageURLs) > 0 {
+		preflightAI, preflightAccessToken, err = e.ensureImageUploadAccessToken(ctx, a)
+		if err != nil {
+			state.end()
+			return nil, err
+		}
+		preflightUploaded, err = e.prepareUploadedTurnFiles(ctx, a, preflightAccessToken, state.turn.ImageURLs)
+		if err != nil {
+			state.end()
+			return nil, err
+		}
+		hasImageUploads = true
 	}
 
 	ch := make(chan clipexec.StreamChunk, 64)
@@ -287,11 +310,18 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 	go func() {
 		defer close(ch)
 		defer state.end()
+		if len(preflightUploaded.Uploaded) > 0 {
+			defer e.cleanupUploadedTurnFiles(nil, a, preflightAccessToken, preflightUploaded)
+		}
 
-		ai, accessToken, err := e.ensureAccessToken(ctx, a)
-		if err != nil {
-			e.emitFailed(ch, state.responseID, "unauthorized", err.Error())
-			return
+		ai := preflightAI
+		accessToken := preflightAccessToken
+		if !hasImageUploads {
+			ai, accessToken, err = e.ensureAccessToken(ctx, a)
+			if err != nil {
+				e.emitFailed(ch, state.responseID, "unauthorized", err.Error())
+				return
+			}
 		}
 
 		created, err := buildResponseCreatedEvent(state.responseID, state.model)
@@ -300,7 +330,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		}
 
 		userTask := resolveUserTask(state.turn, state.inputVal)
-		payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs)
+		payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs, preflightUploaded.Files)
 
 		if strings.TrimSpace(state.st.conversationID) == "" {
 			convID, err := e.createConversation(ctx, a, accessToken)

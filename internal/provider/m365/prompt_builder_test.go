@@ -48,6 +48,7 @@ func TestBuildUpstreamPayload_IgnoresModelAndReasoningInputs(t *testing.T) {
 		"low",
 		tools,
 		toolOutputs,
+		[]m365File{{URI: "https://contoso.sharepoint.com/sites/Engineering/image.png"}},
 	)
 
 	if got.Message.Text != "Do work" {
@@ -58,6 +59,9 @@ func TestBuildUpstreamPayload_IgnoresModelAndReasoningInputs(t *testing.T) {
 	}
 	if got.ContextualResource == nil || got.ContextualResource.WebContext == nil || !got.ContextualResource.WebContext.IsWebEnabled {
 		t.Fatalf("expected web context to be enabled")
+	}
+	if len(got.ContextualResource.Files) != 1 {
+		t.Fatalf("expected 1 contextual file, got %d", len(got.ContextualResource.Files))
 	}
 	for _, item := range got.AdditionalContext {
 		if strings.Contains(item.Text, "Reasoning effort:") {

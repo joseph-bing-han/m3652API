@@ -304,3 +304,12 @@ func anyStringSlice(v any) []string {
 		return nil
 	}
 }
+
+func anyBool(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	default:
+		return false
+	}
+}
