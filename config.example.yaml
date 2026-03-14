@@ -3,7 +3,7 @@
 # Copy to config.yaml and adjust values.
 
 # Bind to localhost only for safety.
-host: "localhost"
+host: "0.0.0.0"
 port: 8217
 
 # Where m3652api auth state and token cache are stored.

@@ -39,7 +39,8 @@ cp config.example.yaml config.yaml
 
 - `api-keys`：给 Codex CLI 使用的 API key
 - `auth-dir`：token 存储目录
-- `host/port`：建议仅监听 `localhost`
+- `host/port`：本地裸跑建议监听 `localhost`；Docker 部署时应监听 `0.0.0.0`
+- `m365.redirect-uri`：建议显式设置为 `http://localhost:8217/m365/oauth/callback`
 - `m365.tenant-id` / `m365.client-id` / `m365.client-secret`
 
 2. 编译
@@ -79,6 +80,44 @@ Copilot Chat API 只接受 **Delegated 用户令牌**。本项目不使用 devic
 如需快速验证上游 Graph 权限与 Copilot Chat 可用性（会创建一个 conversation）：
 
 - `http://localhost:8217/m365/upstream/check`
+
+## Docker 部署
+
+仓库已提供 `Dockerfile` 与 `docker-compose.yml`，默认行为如下：
+
+- 将当前项目编译进镜像
+- 将宿主机 `./auth` 挂载到容器 `/app/auth`
+- 将宿主机 `./config.yaml` 挂载到容器 `/app/config.yaml`
+- 将容器 `8217` 端口仅映射到宿主机 `127.0.0.1:8217`
+
+启动命令：
+
+```bash
+docker compose up -d --build
+```
+
+停止命令：
+
+```bash
+docker compose down
+```
+
+为了让 Docker 端口映射生效，同时继续满足 Microsoft 对 OAuth 回调地址的限制，`config.yaml` 里需要至少保证：
+
+```yaml
+host: "0.0.0.0"
+port: 8217
+
+m365:
+  redirect-uri: "http://localhost:8217/m365/oauth/callback"
+```
+
+说明：
+
+- 容器内服务需要监听 `0.0.0.0`，这样宿主机的端口转发才能连进容器
+- 浏览器访问与 OAuth 回调地址仍然统一使用 `http://localhost:8217/...`
+- 这是因为 Microsoft 对非 HTTPS 的 OAuth redirect URI 只接受 `http://localhost`
+- `docker-compose.yml` 已将宿主机绑定限制为 `127.0.0.1`，不会默认暴露到局域网
 
 
 ## 配置 Codex CLI
@@ -162,4 +201,4 @@ http://localhost:8217/m365/oauth/start
 
 - 上游 M365 Chat API 为 beta，不承诺稳定；遇到字段/行为变更需要快速修复。
 - 工具调用是“代理侧编排”：上游通过文本协议输出工具调用 JSON，Codex CLI 执行后把输出回填给上游继续推理。
-- 请只在受信任的本机环境运行，并将服务绑定到 `localhost`，避免把工具执行能力暴露到公网。
+- 请只在受信任的本机环境运行；本地裸跑建议绑定 `localhost`，Docker compose 默认仅绑定宿主机 `127.0.0.1`，避免把工具执行能力暴露到公网。

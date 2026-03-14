@@ -1,0 +1,12 @@
+services:
+  m3652api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: m3652api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8217:8217"
+    volumes:
+      - ./auth:/app/auth
+      - ./config.yaml:/app/config.yaml:ro
