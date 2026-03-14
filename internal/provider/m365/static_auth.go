@@ -44,9 +44,6 @@ func EnsureStaticAuth(ctx context.Context, core *coreauth.Manager, runtime Runti
 		cloned.Metadata["timezone"] = runtime.TimeZone
 		cloned.Metadata["scopes"] = runtime.Scopes
 		cloned.Metadata["delegated_scopes"] = runtime.DelegatedScopes
-		if strings.TrimSpace(runtime.OCRLangs) != "" {
-			cloned.Metadata["ocr_langs"] = runtime.OCRLangs
-		}
 		return cloned
 	}
 

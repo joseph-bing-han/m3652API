@@ -47,9 +47,6 @@ m365:
   #   - "https://graph.microsoft.com/Chat.Read"
   #   - "https://graph.microsoft.com/ChannelMessage.Read.All"
   #   - "https://graph.microsoft.com/ExternalItem.Read.All"
-  # Optional OCR language pack list for tesseract.
-  # Example: "eng+chi_sim"
-  ocr-langs: "eng"
 
 # Keep WebSocket auth disabled; this project focuses on HTTP SSE.
 ws-auth: false

@@ -22,7 +22,6 @@ type DeviceCodeLoginOptions struct {
 	TimeZone string
 	Label    string
 	Scopes   []string
-	OCRLangs string
 }
 
 func LoginDeviceCode(ctx context.Context, store coreauth.Store, opts DeviceCodeLoginOptions) (string, error) {
@@ -36,7 +35,6 @@ func LoginDeviceCode(ctx context.Context, store coreauth.Store, opts DeviceCodeL
 	opts.ClientID = strings.TrimSpace(opts.ClientID)
 	opts.TimeZone = strings.TrimSpace(opts.TimeZone)
 	opts.Label = strings.TrimSpace(opts.Label)
-	opts.OCRLangs = strings.TrimSpace(opts.OCRLangs)
 
 	if opts.TenantID == "" {
 		return "", errors.New("m365 login: tenant_id is empty")
@@ -88,9 +86,6 @@ func LoginDeviceCode(ctx context.Context, store coreauth.Store, opts DeviceCodeL
 			"expires_at":    expiresAt,
 			"obtained_at":   now.Unix(),
 		},
-	}
-	if opts.OCRLangs != "" {
-		metadata["ocr_langs"] = opts.OCRLangs
 	}
 
 	auth := &coreauth.Auth{

@@ -77,7 +77,6 @@ func TestEnsureStaticAuth_PreservesTokenMetadata(t *testing.T) {
 		TimeZone:        "Pacific/Auckland",
 		Scopes:          []string{"https://graph.microsoft.com/.default"},
 		DelegatedScopes: []string{"openid", "profile", "offline_access"},
-		OCRLangs:        "",
 	}
 
 	out, err := EnsureStaticAuth(context.Background(), core, runtime, "")

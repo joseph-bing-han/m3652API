@@ -13,8 +13,8 @@ const (
 	maxSchemaSummaryChar = 240
 )
 
-func buildAdditionalContext(instructions, verbosity string, tools []openAITool, toolOutputs []string, ocrResults []string) []m365ContextMessage {
-	out := make([]m365ContextMessage, 0, 6)
+func buildAdditionalContext(instructions, verbosity string, tools []openAITool, toolOutputs []string) []m365ContextMessage {
+	out := make([]m365ContextMessage, 0, 5)
 
 	sys := strings.TrimSpace(strings.Join([]string{
 		baseSystemInstructions(),
@@ -51,14 +51,6 @@ func buildAdditionalContext(instructions, verbosity string, tools []openAITool, 
 		txt := strings.Join(toolOutputs, "\n\n")
 		out = append(out, m365ContextMessage{
 			Description: "Tool outputs",
-			Text:        truncateMiddle(txt, maxContextBlockChars),
-		})
-	}
-
-	if len(ocrResults) > 0 {
-		txt := strings.Join(ocrResults, "\n\n")
-		out = append(out, m365ContextMessage{
-			Description: "Image OCR results",
 			Text:        truncateMiddle(txt, maxContextBlockChars),
 		})
 	}

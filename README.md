@@ -6,7 +6,7 @@
 
 - HTTP SSE 流式输出（不强依赖 WebSocket）
 - 工具调用闭环（function/custom/local_shell）
-- 图片输入降级（OCR 识别 → 文本注入给上游）
+- 纯文本请求转发到 Microsoft Graph Copilot Chat
 - `GET /v1/models` 兼容模型别名列表（用于客户端探测与配置，不会切换微软上游真实模型）
 
 
@@ -23,10 +23,7 @@
      - `client-id`
      - `client-secret`
    - 由于 Copilot Chat API **仅支持 Delegated**，首次使用需要进行一次浏览器授权（见“快速开始”）
-4. OCR（必需）
-   - 需要本机安装 `tesseract`
-   - 本项目只支持 `data:` 形式的图片（例如 `data:image/png;base64,...`），不默认下载远程 URL
-5. Go toolchain
+4. Go toolchain
    - 由于依赖 `CLIProxyAPI/v6`，本仓库 `go.mod` 使用 `go 1.26.0`（建议使用支持 toolchain 的 Go 环境）
 
 
@@ -110,11 +107,11 @@ export OPENAI_API_KEY="change-me"
 提示：当 `OPENAI_BASE_URL` 指向非官方 OpenAI 地址时，Codex CLI 的“读取模型列表”行为可能依赖服务端对 `/v1/models` 的实现，本项目提供的是**兼容性模型别名列表**，以提高客户端接入兼容性。
 
 
-## OCR 说明
+## 图片输入限制
 
-- 代理会把 `input_image` 的 `image_url` 解码并执行 OCR，再把结果注入到上游请求的 `additionalContext` 中。
-- 如果 OCR 失败（例如未安装 `tesseract`、缺少语言包、图片过大），也会注入明确错误文本，避免 silent drop。
-- 如需中文识别，请安装对应语言包（例如 `chi_sim`），并确保 `tesseract --list-langs` 能看到它，然后在 `config.yaml` 中设置 `m365.ocr-langs: "eng+chi_sim"`。
+- 当前实现**不支持** OpenAI Responses 风格的 `input_image`。
+- 当 Codex CLI 传入图片时，代理会直接返回 `400 invalid_request_error`，不会再尝试本地 OCR，也不会把图片上传或转发到微软上游。
+- 当前微软上游集成在本项目里只走文本消息路径；如需分析图片，请先将图片内容转换为文本描述后再发送。
 
 
 ## 重要限制与安全提示

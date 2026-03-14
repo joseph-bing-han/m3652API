@@ -32,7 +32,7 @@ func NewExecutor(cfg *config.Config) *Executor {
 
 func (Executor) Identifier() string { return providerKey }
 
-func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructions, verbosity string, tools []openAITool, toolOutputs, ocrResults []string) m365ChatOverStreamRequest {
+func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructions, verbosity string, tools []openAITool, toolOutputs []string) m365ChatOverStreamRequest {
 	payload := m365ChatOverStreamRequest{
 		Message:      m365RequestMessage{Text: userTask},
 		LocationHint: m365LocationHint{TimeZone: timeZone},
@@ -40,11 +40,32 @@ func buildUpstreamPayload(userTask, timeZone string, webEnabled bool, instructio
 			WebContext: &m365WebContext{IsWebEnabled: webEnabled},
 		},
 	}
-	payload.AdditionalContext = buildAdditionalContext(instructions, verbosity, tools, toolOutputs, ocrResults)
+	payload.AdditionalContext = buildAdditionalContext(instructions, verbosity, tools, toolOutputs)
 	return payload
 }
 
-func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
+type preparedTurnState struct {
+	rawReq       []byte
+	model        string
+	responseID   string
+	inputVal     gjson.Result
+	instructions string
+	verbosity    string
+	tools        []openAITool
+	turn         turnExtract
+	webEnabled   bool
+	st           *sessionState
+	end          func()
+}
+
+func (e *Executor) prepareTurnState(req clipexec.Request, opts clipexec.Options) (preparedTurnState, error) {
+	if e == nil {
+		return preparedTurnState{}, errors.New("m365 executor: executor is nil")
+	}
+	if e.sessions == nil {
+		e.sessions = newSessionStore(30 * time.Minute)
+	}
+
 	rawReq := opts.OriginalRequest
 	if len(rawReq) == 0 {
 		rawReq = req.Payload
@@ -58,13 +79,8 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	responseID := "resp_" + uuid.NewString()
 
 	// 定期清理会话（尽力而为）。
-	if e != nil && e.gcTick.Add(1)%128 == 0 {
+	if e.gcTick.Add(1)%128 == 0 {
 		e.sessions.gc()
-	}
-
-	ai, accessToken, err := e.ensureAccessToken(ctx, a)
-	if err != nil {
-		return clipexec.Response{}, err
 	}
 
 	sessionKey := strings.TrimSpace(gjson.GetBytes(rawReq, "prompt_cache_key").String())
@@ -74,9 +90,15 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 
 	st, end, err := e.sessions.tryStart(sessionKey)
 	if err != nil {
-		return clipexec.Response{}, err
+		return preparedTurnState{}, err
 	}
-	defer end()
+
+	releaseNeeded := true
+	defer func() {
+		if releaseNeeded && end != nil {
+			end()
+		}
+	}()
 
 	inputVal := gjson.GetBytes(rawReq, "input")
 	instructions := gjson.GetBytes(rawReq, "instructions").String()
@@ -88,40 +110,17 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 		tools = nil
 	}
 
-	var newItems []gjson.Result
-	if inputVal.IsArray() {
-		allItems := inputVal.Array()
-		if len(allItems) < st.processedInputLen {
-			// 客户端可能重置了对话状态。
-			st.processedInputLen = 0
-			st.conversationID = ""
-		}
-		if st.processedInputLen < len(allItems) {
-			newItems = allItems[st.processedInputLen:]
-		} else {
-			newItems = nil
-		}
-		// 提前更新已处理长度，避免缓存无限增长。
-		st.processedInputLen = len(allItems)
-	} else if inputVal.Type == gjson.String {
-		// 无历史模式。
-		newItems = []gjson.Result{
-			gjson.Result{Type: gjson.String, Str: inputVal.String()},
-		}
+	turn, nextProcessedLen, resetConversation := extractPendingTurn(inputVal, st)
+	if err := validateNoImageInputs(turn.ImageURLs); err != nil {
+		return preparedTurnState{}, err
 	}
 
-	turn := extractTurnData(newItems)
-	userTask := strings.TrimSpace(turn.UserTaskText)
-	if userTask == "" {
-		if len(turn.ToolOutputs) > 0 {
-			userTask = "Continue."
-		} else if len(turn.ImageURLs) > 0 {
-			userTask = "Analyze the provided image(s) and follow the user's intent."
-		} else if inputVal.Type == gjson.String {
-			userTask = strings.TrimSpace(inputVal.String())
-		} else {
-			userTask = "Continue."
-		}
+	if resetConversation {
+		st.processedInputLen = 0
+		st.conversationID = ""
+	}
+	if nextProcessedLen >= 0 {
+		st.processedInputLen = nextProcessedLen
 	}
 
 	webEnabled := true
@@ -129,22 +128,74 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 		webEnabled = v.Bool()
 	}
 
-	ocrResults := e.buildOCRResults(ctx, a, turn.ImageURLs)
+	releaseNeeded = false
+	return preparedTurnState{
+		rawReq:       rawReq,
+		model:        model,
+		responseID:   responseID,
+		inputVal:     inputVal,
+		instructions: instructions,
+		verbosity:    verbosity,
+		tools:        tools,
+		turn:         turn,
+		webEnabled:   webEnabled,
+		st:           st,
+		end:          end,
+	}, nil
+}
 
-	payload := buildUpstreamPayload(userTask, ai.TimeZone, webEnabled, instructions, verbosity, tools, turn.ToolOutputs, ocrResults)
+func resolveUserTask(turn turnExtract, inputVal gjson.Result) string {
+	userTask := strings.TrimSpace(turn.UserTaskText)
+	if userTask != "" {
+		return userTask
+	}
+	if len(turn.ToolOutputs) > 0 {
+		return "Continue."
+	}
+	if len(turn.ImageURLs) > 0 {
+		return "Analyze the provided image(s) and follow the user's intent."
+	}
+	if inputVal.Type == gjson.String {
+		return strings.TrimSpace(inputVal.String())
+	}
+	return "Continue."
+}
 
-	if strings.TrimSpace(st.conversationID) == "" {
+func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
+	rawReq := opts.OriginalRequest
+	if len(rawReq) == 0 {
+		rawReq = req.Payload
+	}
+	if err := validateNoImageInput(rawReq); err != nil {
+		return clipexec.Response{}, err
+	}
+
+	state, err := e.prepareTurnState(req, opts)
+	if err != nil {
+		return clipexec.Response{}, err
+	}
+	defer state.end()
+
+	ai, accessToken, err := e.ensureAccessToken(ctx, a)
+	if err != nil {
+		return clipexec.Response{}, err
+	}
+
+	userTask := resolveUserTask(state.turn, state.inputVal)
+	payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs)
+
+	if strings.TrimSpace(state.st.conversationID) == "" {
 		convID, err := e.createConversation(ctx, a, accessToken)
 		if err != nil {
 			return clipexec.Response{}, err
 		}
-		st.conversationID = convID
+		state.st.conversationID = convID
 	}
 
 	upCtx, upCancel := withTimeoutIfNone(ctx, 300*time.Second)
 	defer upCancel()
 
-	resp, err := e.chatOverStream(upCtx, a, accessToken, st.conversationID, payload)
+	resp, err := e.chatOverStream(upCtx, a, accessToken, state.st.conversationID, payload)
 	if err != nil {
 		return clipexec.Response{}, err
 	}
@@ -162,11 +213,11 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 		}
 		finalAssistantText = current
 
-		if len(tools) > 0 && looksLikeToolCallCandidate(current) {
+		if len(state.tools) > 0 && looksLikeToolCallCandidate(current) {
 			sawToolCandidate = true
 		}
-		if len(tools) > 0 {
-			if items := parseToolCallItems(current, tools); len(items) > 0 {
+		if len(state.tools) > 0 {
+			if items := parseToolCallItems(current, state.tools); len(items) > 0 {
 				toolItems = items
 				toolEmitted = true
 				upCancel()
@@ -177,7 +228,7 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	})
 
 	if toolEmitted && len(toolItems) > 0 {
-		out, err := buildNonStreamingResponse(responseID, model, toolItems)
+		out, err := buildNonStreamingResponse(state.responseID, state.model, toolItems)
 		if err != nil {
 			return clipexec.Response{}, err
 		}
@@ -185,9 +236,9 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	}
 
 	// 兜底解析：上游可能会把 JSON 包在额外文本中。
-	if len(tools) > 0 {
-		if items := parseToolCallItems(finalAssistantText, tools); len(items) > 0 {
-			out, err := buildNonStreamingResponse(responseID, model, items)
+	if len(state.tools) > 0 {
+		if items := parseToolCallItems(finalAssistantText, state.tools); len(items) > 0 {
+			out, err := buildNonStreamingResponse(state.responseID, state.model, items)
 			if err != nil {
 				return clipexec.Response{}, err
 			}
@@ -198,10 +249,10 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	if !sawToolCandidate && looksLikeToolCallCandidate(finalAssistantText) {
 		sawToolCandidate = true
 	}
-	forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, tools)
-	if forceRepair && len(tools) > 0 && ctx.Err() == nil {
-		if items, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
-			out, err := buildNonStreamingResponse(responseID, model, items)
+	forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, state.tools)
+	if forceRepair && len(state.tools) > 0 && ctx.Err() == nil {
+		if items, ok := e.repairToolCall(ctx, a, accessToken, state.st.conversationID, payload, state.tools); ok {
+			out, err := buildNonStreamingResponse(state.responseID, state.model, items)
 			if err != nil {
 				return clipexec.Response{}, err
 			}
@@ -210,7 +261,7 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 	}
 
 	item := buildAssistantMessageItem(sanitizeAssistantTextForDisplay(finalAssistantText))
-	out, err := buildNonStreamingResponse(responseID, model, []any{item})
+	out, err := buildNonStreamingResponse(state.responseID, state.model, []any{item})
 	if err != nil {
 		return clipexec.Response{}, err
 	}
@@ -218,121 +269,54 @@ func (e *Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.R
 }
 
 func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (*clipexec.StreamResult, error) {
+	rawReq := opts.OriginalRequest
+	if len(rawReq) == 0 {
+		rawReq = req.Payload
+	}
+	if err := validateNoImageInput(rawReq); err != nil {
+		return nil, err
+	}
+
+	state, err := e.prepareTurnState(req, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	ch := make(chan clipexec.StreamChunk, 64)
 
 	go func() {
 		defer close(ch)
+		defer state.end()
 
-		rawReq := opts.OriginalRequest
-		if len(rawReq) == 0 {
-			rawReq = req.Payload
+		ai, accessToken, err := e.ensureAccessToken(ctx, a)
+		if err != nil {
+			e.emitFailed(ch, state.responseID, "unauthorized", err.Error())
+			return
 		}
 
-		model := strings.TrimSpace(gjson.GetBytes(rawReq, "model").String())
-		if model == "" {
-			model = req.Model
-		}
-		model = normalizeModelLabel(model)
-		responseID := "resp_" + uuid.NewString()
-
-		// 定期清理会话（尽力而为）。
-		if e.gcTick.Add(1)%128 == 0 {
-			e.sessions.gc()
-		}
-
-		created, err := buildResponseCreatedEvent(responseID, model)
+		created, err := buildResponseCreatedEvent(state.responseID, state.model)
 		if err == nil {
 			ch <- clipexec.StreamChunk{Payload: created}
 		}
 
-		ai, accessToken, err := e.ensureAccessToken(ctx, a)
-		if err != nil {
-			e.emitFailed(ch, responseID, "unauthorized", err.Error())
-			return
-		}
+		userTask := resolveUserTask(state.turn, state.inputVal)
+		payload := buildUpstreamPayload(userTask, ai.TimeZone, state.webEnabled, state.instructions, state.verbosity, state.tools, state.turn.ToolOutputs)
 
-		sessionKey := strings.TrimSpace(gjson.GetBytes(rawReq, "prompt_cache_key").String())
-		if sessionKey == "" {
-			sessionKey = responseID
-		}
-
-		st, end, err := e.sessions.tryStart(sessionKey)
-		if err != nil {
-			e.emitFailed(ch, responseID, "conflict", err.Error())
-			return
-		}
-		defer end()
-
-		inputVal := gjson.GetBytes(rawReq, "input")
-		instructions := gjson.GetBytes(rawReq, "instructions").String()
-		verbosity := gjson.GetBytes(rawReq, "text.verbosity").String()
-		toolChoice := strings.TrimSpace(gjson.GetBytes(rawReq, "tool_choice").String())
-
-		tools := parseOpenAITools(rawReq)
-		if strings.EqualFold(toolChoice, "none") {
-			tools = nil
-		}
-
-		var newItems []gjson.Result
-		if inputVal.IsArray() {
-			allItems := inputVal.Array()
-			if len(allItems) < st.processedInputLen {
-				// 客户端可能重置了对话状态。
-				st.processedInputLen = 0
-				st.conversationID = ""
-			}
-			if st.processedInputLen < len(allItems) {
-				newItems = allItems[st.processedInputLen:]
-			} else {
-				newItems = nil
-			}
-			// 提前更新已处理长度，避免缓存无限增长。
-			st.processedInputLen = len(allItems)
-		} else if inputVal.Type == gjson.String {
-			// 无历史模式。
-			newItems = []gjson.Result{
-				gjson.Result{Type: gjson.String, Str: inputVal.String()},
-			}
-		}
-
-		turn := extractTurnData(newItems)
-		userTask := strings.TrimSpace(turn.UserTaskText)
-		if userTask == "" {
-			if len(turn.ToolOutputs) > 0 {
-				userTask = "Continue."
-			} else if len(turn.ImageURLs) > 0 {
-				userTask = "Analyze the provided image(s) and follow the user's intent."
-			} else if inputVal.Type == gjson.String {
-				userTask = strings.TrimSpace(inputVal.String())
-			} else {
-				userTask = "Continue."
-			}
-		}
-
-		webEnabled := true
-		if v := gjson.GetBytes(rawReq, "metadata.web_enabled"); v.Exists() {
-			webEnabled = v.Bool()
-		}
-
-		ocrResults := e.buildOCRResults(ctx, a, turn.ImageURLs)
-
-		payload := buildUpstreamPayload(userTask, ai.TimeZone, webEnabled, instructions, verbosity, tools, turn.ToolOutputs, ocrResults)
-
-		if strings.TrimSpace(st.conversationID) == "" {
+		if strings.TrimSpace(state.st.conversationID) == "" {
 			convID, err := e.createConversation(ctx, a, accessToken)
 			if err != nil {
-				e.emitFailed(ch, responseID, "upstream_error", err.Error())
+				e.emitFailed(ch, state.responseID, "upstream_error", err.Error())
 				return
 			}
-			st.conversationID = convID
+			state.st.conversationID = convID
 		}
 
 		upCtx, upCancel := withTimeoutIfNone(ctx, 300*time.Second)
 		defer upCancel()
 
-		resp, err := e.chatOverStream(upCtx, a, accessToken, st.conversationID, payload)
+		resp, err := e.chatOverStream(upCtx, a, accessToken, state.st.conversationID, payload)
 		if err != nil {
-			e.emitFailed(ch, responseID, "upstream_error", err.Error())
+			e.emitFailed(ch, state.responseID, "upstream_error", err.Error())
 			return
 		}
 		defer resp.Body.Close()
@@ -350,17 +334,17 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 			finalAssistantText = current
 
 			visibleCurrent := current
-			if len(tools) > 0 {
+			if len(state.tools) > 0 {
 				if looksLikeToolCallCandidate(current) {
 					sawToolCandidate = true
 				}
-				if items := parseToolCallItems(current, tools); len(items) > 0 {
+				if items := parseToolCallItems(current, state.tools); len(items) > 0 {
 					for _, item := range items {
 						if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 							ch <- clipexec.StreamChunk{Payload: outEv}
 						}
 					}
-					if done, err := buildResponseCompletedEvent(responseID); err == nil {
+					if done, err := buildResponseCompletedEvent(state.responseID); err == nil {
 						ch <- clipexec.StreamChunk{Payload: done}
 					}
 					toolEmitted = true
@@ -397,14 +381,14 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		}
 
 		// 兜底解析：上游可能会把 JSON 或定界符块包在额外文本中。
-		if len(tools) > 0 {
-			if items := parseToolCallItems(finalAssistantText, tools); len(items) > 0 {
+		if len(state.tools) > 0 {
+			if items := parseToolCallItems(finalAssistantText, state.tools); len(items) > 0 {
 				for _, item := range items {
 					if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 						ch <- clipexec.StreamChunk{Payload: outEv}
 					}
 				}
-				if done, err := buildResponseCompletedEvent(responseID); err == nil {
+				if done, err := buildResponseCompletedEvent(state.responseID); err == nil {
 					ch <- clipexec.StreamChunk{Payload: done}
 				}
 				return
@@ -414,15 +398,15 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		if !sawToolCandidate && looksLikeToolCallCandidate(finalAssistantText) {
 			sawToolCandidate = true
 		}
-		forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, tools)
-		if forceRepair && len(tools) > 0 && ctx.Err() == nil {
-			if items, ok := e.repairToolCall(ctx, a, accessToken, st.conversationID, payload, tools); ok {
+		forceRepair := sawToolCandidate || shouldForceToolRepair(userTask, finalAssistantText, state.tools)
+		if forceRepair && len(state.tools) > 0 && ctx.Err() == nil {
+			if items, ok := e.repairToolCall(ctx, a, accessToken, state.st.conversationID, payload, state.tools); ok {
 				for _, item := range items {
 					if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 						ch <- clipexec.StreamChunk{Payload: outEv}
 					}
 				}
-				if done, err := buildResponseCompletedEvent(responseID); err == nil {
+				if done, err := buildResponseCompletedEvent(state.responseID); err == nil {
 					ch <- clipexec.StreamChunk{Payload: done}
 				}
 				return
@@ -437,7 +421,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clip
 		if outEv, err := buildResponseOutputItemDoneEvent(item); err == nil {
 			ch <- clipexec.StreamChunk{Payload: outEv}
 		}
-		if done, err := buildResponseCompletedEvent(responseID); err == nil {
+		if done, err := buildResponseCompletedEvent(state.responseID); err == nil {
 			ch <- clipexec.StreamChunk{Payload: done}
 		}
 	}()

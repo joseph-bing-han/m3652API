@@ -77,3 +77,58 @@ func TestParseOpenAITools_ChatCompletionsStyleFunction(t *testing.T) {
 		t.Fatalf("unexpected local_shell tool: %#v", tools[1])
 	}
 }
+
+func TestExtractPendingTurn_DoesNotIncludeHistoryItems(t *testing.T) {
+	input := gjson.Parse(`[
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {"type": "input_text", "text": "first"}
+    ]
+  },
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {"type": "input_text", "text": "second"}
+    ]
+  }
+]`)
+
+	st := &sessionState{processedInputLen: 1}
+	turn, nextLen, resetConversation := extractPendingTurn(input, st)
+	if resetConversation {
+		t.Fatal("did not expect conversation reset")
+	}
+	if nextLen != 2 {
+		t.Fatalf("expected next processed length 2, got %d", nextLen)
+	}
+	if turn.UserTaskText != "second" {
+		t.Fatalf("unexpected user task: %q", turn.UserTaskText)
+	}
+}
+
+func TestExtractPendingTurn_ResetsWhenHistoryShrinks(t *testing.T) {
+	input := gjson.Parse(`[
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {"type": "input_text", "text": "rewritten"}
+    ]
+  }
+]`)
+
+	st := &sessionState{processedInputLen: 3}
+	turn, nextLen, resetConversation := extractPendingTurn(input, st)
+	if !resetConversation {
+		t.Fatal("expected conversation reset")
+	}
+	if nextLen != 1 {
+		t.Fatalf("expected next processed length 1, got %d", nextLen)
+	}
+	if turn.UserTaskText != "rewritten" {
+		t.Fatalf("unexpected user task: %q", turn.UserTaskText)
+	}
+}

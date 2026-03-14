@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildAdditionalContext_IgnoresReasoningEffort(t *testing.T) {
-	out := buildAdditionalContext("system", "", nil, nil, nil)
+	out := buildAdditionalContext("system", "", nil, nil)
 	for _, item := range out {
 		if strings.Contains(item.Text, "Reasoning effort:") {
 			t.Fatalf("unexpected reasoning hint in additional context: %#v", item)
@@ -18,7 +18,7 @@ func TestBuildAdditionalContext_IgnoresReasoningEffort(t *testing.T) {
 }
 
 func TestBuildAdditionalContext_UsesVerbosityOnly(t *testing.T) {
-	out := buildAdditionalContext("system", "verbose", nil, nil, nil)
+	out := buildAdditionalContext("system", "verbose", nil, nil)
 
 	foundOutputStyle := false
 	for _, item := range out {
@@ -39,7 +39,6 @@ func TestBuildAdditionalContext_UsesVerbosityOnly(t *testing.T) {
 func TestBuildUpstreamPayload_IgnoresModelAndReasoningInputs(t *testing.T) {
 	tools := []openAITool{{ToolType: "function", Name: "exec_command"}}
 	toolOutputs := []string{"ok"}
-	ocrResults := []string{"text"}
 
 	got := buildUpstreamPayload(
 		"Do work",
@@ -49,7 +48,6 @@ func TestBuildUpstreamPayload_IgnoresModelAndReasoningInputs(t *testing.T) {
 		"low",
 		tools,
 		toolOutputs,
-		ocrResults,
 	)
 
 	if got.Message.Text != "Do work" {
@@ -64,6 +62,9 @@ func TestBuildUpstreamPayload_IgnoresModelAndReasoningInputs(t *testing.T) {
 	for _, item := range got.AdditionalContext {
 		if strings.Contains(item.Text, "Reasoning effort:") {
 			t.Fatalf("unexpected reasoning hint in upstream payload: %#v", item)
+		}
+		if item.Description == "Image OCR results" {
+			t.Fatalf("unexpected OCR context block: %#v", item)
 		}
 	}
 }

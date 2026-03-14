@@ -19,7 +19,6 @@ type RuntimeConfig struct {
 	DelegatedScopes []string `yaml:"delegated-scopes"`
 	RedirectURI     string   `yaml:"redirect-uri"`
 	AuthorizePrompt string   `yaml:"authorize-prompt"`
-	OCRLangs        string   `yaml:"ocr-langs"`
 }
 
 type runtimeConfigFile struct {
@@ -48,7 +47,6 @@ func LoadRuntimeConfig(configPath string) (RuntimeConfig, error) {
 	cfg.ClientID = strings.TrimSpace(cfg.ClientID)
 	cfg.ClientSecret = strings.TrimSpace(cfg.ClientSecret)
 	cfg.TimeZone = strings.TrimSpace(cfg.TimeZone)
-	cfg.OCRLangs = strings.TrimSpace(cfg.OCRLangs)
 	cfg.Scopes = sanitizeScopes(cfg.Scopes)
 	cfg.DelegatedScopes = sanitizeScopes(cfg.DelegatedScopes)
 	cfg.RedirectURI = strings.TrimSpace(cfg.RedirectURI)
